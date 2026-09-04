@@ -45,3 +45,17 @@ dregs = "dataregistry_cli.cli:main"
 
 [tool.setuptools.package-data]
 "dataregistry" = ["site_config/site_rootdir.yaml", "schema/*.yaml"]
+
+[dependency-groups]
+api = [
+    "fastapi>=0.141.1",
+    "globus-sdk>=4.9.0",
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+]
+api-test = [
+    {include-group = "api"},
+    "GitPython",          # required by scripts/create_registry_schema.py
+    "httpx2",              # required by fastapi.testclient.TestClient
+    "pytest",
+]

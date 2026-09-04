@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: dataregistry-dev-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: desc_data_registry
+    ports:
+      - "5432:5432"
+    volumes:
+      - dataregistry-dev-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d desc_data_registry"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  dataregistry-dev-pgdata:
