@@ -53,15 +53,16 @@ from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.exc import OperationalError
 
 from dataregistry_api import database
+from dataregistry_api.app import APP
 from dataregistry_api.config import DatabaseSettings, get_database_connection_url
-from dataregistry_api.routes import APP
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CREATE_SCHEMA_SCRIPT = REPO_ROOT / "scripts" / "create_registry_schema.py"
 
-#: Namespace used for the API test schemas. Deliberately distinct from the
-#: ``lsst_desc`` namespace used by the end-to-end suite and the dev seed data.
-TEST_NAMESPACE = "lsst_desc_api_test"
+#: Set in ``tests/api_tests/__init__.py``, which also exports it to the server
+#: via ``DATAREGISTRY_API_NAMESPACE`` before the application is imported.
+from . import TEST_NAMESPACE
+
 WORKING_SCHEMA = f"{TEST_NAMESPACE}_working"
 PRODUCTION_SCHEMA = f"{TEST_NAMESPACE}_production"
 
@@ -197,9 +198,7 @@ def engine(database_url, registry_database) -> Engine:
     engine = create_engine(
         database_url,
         pool_pre_ping=True,
-        connect_args={
-            "options": f"-csearch_path={WORKING_SCHEMA},{PRODUCTION_SCHEMA}"
-        },
+        connect_args={"options": f"-csearch_path={WORKING_SCHEMA},{PRODUCTION_SCHEMA}"},
     )
     try:
         yield engine
@@ -262,3 +261,51 @@ def client(connection):
 def inspector(connection):
     """SQLAlchemy inspector bound to the test connection."""
     return inspect(connection)
+
+
+@pytest.fixture
+def seeded(connection):
+    """Insert the shared query corpus into the test transaction.
+
+    Rows go in on the test connection, so they are visible to endpoints
+    (which share that connection via the ``client`` fixture) and are rolled
+    back afterwards.
+    """
+    from .seed import seed_registry
+
+    return seed_registry(connection, WORKING_SCHEMA, PRODUCTION_SCHEMA)
+
+
+@pytest.fixture
+def query(client):
+    """Call ``POST /datasets/query`` and return the raw response.
+
+    The positional argument is the JSON body; keyword arguments become
+    query-string parameters. Only ``namespace`` and ``query_mode`` live in the
+    query string — pagination, ordering and response shape are body fields, so
+    pass those inside ``body``. ``None`` parameters are dropped so callers can
+    exercise server-side defaults.
+
+    The body defaults to ``{}`` rather than being omitted: the endpoint now
+    requires one, and ``{}`` is the documented way to say "no constraints".
+    """
+
+    def call(body: dict | None = None, **parameters):
+        params = {k: v for k, v in parameters.items() if v is not None}
+        return client.post("/datasets/query", json=body or {}, params=params)
+
+    return call
+
+
+@pytest.fixture
+def rows(query):
+    """Call ``/datasets/query``, assert a 200, and return the `records` rows."""
+
+    def call(body: dict | None = None, **parameters):
+        response = query(body, **parameters)
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["format"] == "records"
+        return payload["data"]
+
+    return call

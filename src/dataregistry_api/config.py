@@ -16,6 +16,24 @@ class DatabaseSettings(BaseSettings):
     database_password: str | None = Field(default=None)
 
 
+class NamespaceSettings(BaseSettings):
+    """The namespace a request addresses when it does not name one.
+
+    A namespace is a pair of schemas, ``<namespace>_working`` and
+    ``<namespace>_production``. Deployments that host the registry under a
+    different namespace (the test suite, for one) override this rather than
+    forcing every client to spell it out on every request.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="dataregistry_api_")
+    namespace: str = Field(default="lsst_desc", min_length=1)
+
+
+def get_default_namespace() -> str:
+    """Return the configured default namespace."""
+    return NamespaceSettings().namespace
+
+
 class DatabasePoolSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="dataregistry_api_")
     pool_size: NonNegativeInt = Field(default=5)
