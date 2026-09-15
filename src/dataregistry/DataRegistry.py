@@ -79,7 +79,7 @@ class DataRegistry:
 
         # Establish connection to database
         if db_connection is None:
-            self.db_connection = DbConnection(
+            db_connection = DbConnection(
                 config_file=config_file,
                 schema=schema,
                 logging_level=logging_level,

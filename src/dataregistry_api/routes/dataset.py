@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query
 
-from dataregistry_api.database import ConnectionDependency
+from dataregistry_api.database import EngineDependency
 from dataregistry_api.handlers import find_datasets
 from dataregistry_api.models import (
     DatasetQueryParameters,
@@ -17,9 +17,9 @@ QueryParameterDependency = Annotated[DatasetQueryParameters, Query()]
 
 @DatasetRouter.post("/query")
 def query_datasets(
-    connection: ConnectionDependency,
+    engine: EngineDependency,
     parameters: QueryParameterDependency,
     request: DatasetQueryRequest,
 ) -> DatasetQueryResponse:
     """Query datasets, returning the rows that match every filter."""
-    return find_datasets(connection, parameters, request)
+    return find_datasets(engine, parameters, request)

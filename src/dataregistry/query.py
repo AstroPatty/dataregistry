@@ -4,7 +4,13 @@ import pandas as pd
 from sqlalchemy import DateTime, Float, Integer, Numeric, func, select
 from sqlalchemy.exc import DBAPIError
 
-from dataregistry.exceptions import DataRegistryException, DataRegistryColumnSpec, DataRegistryNoEntry, DataRegistryUnmanaged, DataRegistryNoColumn
+from dataregistry.exceptions import (
+    DataRegistryColumnSpec,
+    DataRegistryException,
+    DataRegistryNoColumn,
+    DataRegistryNoEntry,
+    DataRegistryUnmanaged,
+)
 from dataregistry.registrar.registrar_util import _form_dataset_path
 
 __all__ = ["Query", "Filter"]
@@ -207,7 +213,7 @@ class Query:
 
                 column_list.add(".".join(mystr))
 
-            if not include_schema:       # we're done
+            if not include_schema:  # we're done
                 break
 
         return sorted(column_list)
@@ -591,7 +597,9 @@ class Query:
             if query_mode == "both":
                 query_mode = self.db_connection._entry_mode
 
-        canonical_names = [p if p.startswith(table + ".") else (table + "." + p) for p in properties]
+        canonical_names = [
+            p if p.startswith(table + ".") else (table + "." + p) for p in properties
+        ]
 
         tables_required, column_list, _ = self._parse_selected_columns(
             canonical_names, schema_mode=query_mode
@@ -613,11 +621,9 @@ class Query:
         if not schema_str:
             schema_str = ""
 
-        sch = list(column_list.keys())[0]   # there only is one
+        sch = list(column_list.keys())[0]  # there only is one
 
-        stmt = select(
-            *[p.label(f"{p.table.name}.{p.name}") for p in column_list[sch]]
-        )
+        stmt = select(*[p.label(f"{p.table.name}.{p.name}") for p in column_list[sch]])
 
         # Append filters if acceptable
         if len(filters) > 0:
@@ -839,8 +845,7 @@ class Query:
 
         return Filter(property_name, bin_op, value)
 
-    def get_dataset_absolute_path(self, dataset_id, schema=None,
-                                  silent=True):
+    def get_dataset_absolute_path(self, dataset_id, schema=None, silent=True):
         """
         Return full absolute path of specified dataset in specified schema
         Note as used here `schema` is not an actual schema name, but a
@@ -897,18 +902,17 @@ class Query:
                 )
                 return None
             else:
-                raise DataRegistryNoEntry(dataset_id=dataset_id,
-                                          schema_mode=schema)
+                raise DataRegistryNoEntry(dataset_id=dataset_id, schema_mode=schema)
 
         # Handle bad location_type
         if results["dataset.location_type"][0] not in ("dataregistry", "dummy"):
             if silent:
                 self.db_connection.logger.warning(
-                    "Dataset not stored by dataregistry; has no absolute Path")
+                    "Dataset not stored by dataregistry; has no absolute Path"
+                )
                 return None
             else:
-                raise DataRegistryUnmanaged(dataset_id=dataset_id,
-                                            schema_mode=schema)
+                raise DataRegistryUnmanaged(dataset_id=dataset_id, schema_mode=schema)
 
         # Find actual schema name to pass to _form_dataset_path
         if not self.db_connection._namespace:

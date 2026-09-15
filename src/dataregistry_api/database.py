@@ -70,4 +70,4 @@ def get_database_connection() -> Iterator[Connection]:
         yield conn
 
 
-ConnectionDependency = Annotated[Connection, Depends(get_database_connection)]
+EngineDependency = Annotated[Engine, Depends(get_engine)]

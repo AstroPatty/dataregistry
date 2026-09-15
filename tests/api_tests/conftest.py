@@ -220,41 +220,58 @@ def application_engine(engine: Engine):
         database.set_engine(previous)
 
 
+#: Tables the seed corpus writes to, in delete-safe order (children first).
+#: `keyword` and `provenance` are deliberately absent: they are populated by
+#: `create_registry_schema.py` and the corpus only reads from them.
+_SEEDED_TABLES = ("dataset_keyword", "dependency", "dataset", "execution")
+
+
+def _truncate_seeded_tables(conn) -> None:
+    """Remove every seeded row from both schemas and reset the id sequences.
+
+    `RESTART IDENTITY` keeps generated ids stable from test to test, and
+    `CASCADE` covers any table that gained a foreign key to these since.
+    """
+    targets = ", ".join(
+        f"{schema}.{table}"
+        for schema in (WORKING_SCHEMA, PRODUCTION_SCHEMA)
+        for table in _SEEDED_TABLES
+    )
+    conn.execute(text(f"TRUNCATE {targets} RESTART IDENTITY CASCADE"))
+    conn.commit()
+
+
 @pytest.fixture
 def connection(engine: Engine):
-    """A connection wrapped in a transaction that is rolled back after the test."""
+    """A committing connection, truncated back to empty after each test.
+
+    Rollback-based isolation is not usable here: the endpoints reach the
+    database through an :class:`~sqlalchemy.Engine` and open their own
+    connections, so they cannot see writes that are still uncommitted in
+    another transaction. The corpus is therefore committed for real and
+    cleaned up afterwards.
+    """
     with engine.connect() as conn:
-        transaction = conn.begin()
+        _truncate_seeded_tables(conn)
         try:
             yield conn
         finally:
-            transaction.rollback()
+            _truncate_seeded_tables(conn)
 
 
 @pytest.fixture
 def client(connection):
-    """A ``TestClient`` whose request handlers share the test transaction.
+    """A ``TestClient`` for the application under test.
 
-    Overriding the connection dependency means anything an endpoint writes is
-    visible to the test and discarded afterwards. A savepoint absorbs any
-    commit an endpoint performs so the outer rollback still wins.
+    Handlers are left to obtain their own connections from the shared test
+    engine; because the corpus is committed, they see it. Depending on
+    ``connection`` keeps the truncation lifecycle tied to every test that
+    talks to the API.
     """
     from fastapi.testclient import TestClient
 
-    def override_connection():
-        nested = connection.begin_nested()
-        try:
-            yield connection
-        finally:
-            if nested.is_active:
-                nested.commit()
-
-    APP.dependency_overrides[database.get_database_connection] = override_connection
-    try:
-        with TestClient(APP) as test_client:
-            yield test_client
-    finally:
-        APP.dependency_overrides.clear()
+    with TestClient(APP) as test_client:
+        yield test_client
 
 
 @pytest.fixture
@@ -265,15 +282,17 @@ def inspector(connection):
 
 @pytest.fixture
 def seeded(connection):
-    """Insert the shared query corpus into the test transaction.
+    """Insert and commit the shared query corpus.
 
-    Rows go in on the test connection, so they are visible to endpoints
-    (which share that connection via the ``client`` fixture) and are rolled
-    back afterwards.
+    The commit is what makes the rows visible to endpoints, which query over
+    their own engine-owned connections. The ``connection`` fixture truncates
+    the tables again on teardown.
     """
     from .seed import seed_registry
 
-    return seed_registry(connection, WORKING_SCHEMA, PRODUCTION_SCHEMA)
+    registry = seed_registry(connection, WORKING_SCHEMA, PRODUCTION_SCHEMA)
+    connection.commit()
+    return registry
 
 
 @pytest.fixture

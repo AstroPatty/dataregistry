@@ -141,6 +141,7 @@ def get_database_connection_parameters(logger, config_file):
                     raise ValueError(
                         f"config file {fpath} must be accessible only to user"
                     )
+    return connection_parameters
 
 
 class DbConnection:
@@ -221,7 +222,9 @@ class DbConnection:
         # Set up logger
         self._setup_logger(logging_level)
         if engine is None:
-            connection_parameters = get_database_connection_parameters()
+            connection_parameters = get_database_connection_parameters(
+                self.logger, config_file
+            )
             engine = engine_from_config(connection_parameters)
 
         self._engine = engine
