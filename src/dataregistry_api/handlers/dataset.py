@@ -121,7 +121,8 @@ def _select_columns(catalog, request: DatasetQueryRequest) -> list[str]:
 def _resolve_filters(catalog, request: DatasetQueryRequest) -> list[ResolvedFilter]:
     names = catalog.resolve([f.property_name for f in request.filters])
     return [
-        ResolvedFilter.of(filter_, name) for filter_, name in zip(request.filters, names)
+        ResolvedFilter.of(filter_, name)
+        for filter_, name in zip(request.filters, names)
     ]
 
 

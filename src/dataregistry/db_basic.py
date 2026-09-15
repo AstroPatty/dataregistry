@@ -1,16 +1,15 @@
-from sqlalchemy import engine_from_config
-from sqlalchemy.engine import make_url
-from sqlalchemy import MetaData
-from sqlalchemy import column, insert, select
-import yaml
+import logging
 import os
 import stat
-import logging
 from datetime import datetime
+from functools import cached_property
+
+import yaml
+from sqlalchemy import MetaData, column, engine_from_config, insert, select
+
 from dataregistry import __version__
 from dataregistry.exceptions import DataRegistryException
 from dataregistry.schema import DEFAULT_NAMESPACE
-from functools import cached_property
 
 """
 Low-level utility routines and classes for accessing the registry
@@ -21,10 +20,18 @@ __all__ = [
     "add_table_row",
 ]
 
-_OTHER_ACCESS = stat.S_IRGRP | stat.S_IWGRP | stat.S_IXGRP | stat.S_IROTH |\
-    stat.S_IWOTH | stat.S_IXOTH
+_OTHER_ACCESS = (
+    stat.S_IRGRP
+    | stat.S_IWGRP
+    | stat.S_IXGRP
+    | stat.S_IROTH
+    | stat.S_IWOTH
+    | stat.S_IXOTH
+)
 
-_DEFAULT_LOC_NERSC = "/global/common/software/lsst/dbaccess/dataregistry/data/.writer_config"
+_DEFAULT_LOC_NERSC = (
+    "/global/common/software/lsst/dbaccess/dataregistry/data/.writer_config"
+)
 
 
 def _get_dataregistry_config(logger, config_file=None):
@@ -112,12 +119,37 @@ def add_table_row(conn, table_meta, values, commit=True):
 _PQ_AUTH_PREFIX = "postgresql://"
 
 
+def get_database_connection_parameters(logger, config_file):
+    fpath = _get_dataregistry_config(logger, config_file)
+
+    with open(fpath) as f:
+        connection_parameters = yaml.safe_load(f)
+
+    # If connection parameters include password and file is not
+    # protected, complain
+    if fpath == _DEFAULT_LOC_NERSC:
+        pass
+    elif os.stat(fpath).st_mode & _OTHER_ACCESS:
+        auth_string = connection_parameters["sqlalchemy.url"]
+        if auth_string.startswith(_PQ_AUTH_PREFIX):
+            if auth_string.startswith(_PQ_AUTH_PREFIX + "reg_reader"):
+                pass
+            else:
+                # partially parse to see if password is included
+                auth_string = auth_string[len(_PQ_AUTH_PREFIX) :]
+                if auth_string.find(":") < auth_string.find("@"):
+                    raise ValueError(
+                        f"config file {fpath} must be accessible only to user"
+                    )
+
+
 class DbConnection:
     def __init__(
         self,
         namespace=None,
         config_file=None,
         schema=None,
+        engine=None,
         logging_level=logging.INFO,
         entry_mode="working",
         query_mode="both",
@@ -163,6 +195,9 @@ class DbConnection:
         schema : str, optional
             Schema to connect to, to connect directly to a chosen schema,
             bypassing the namespace (creation of schemas or testing purposes only).
+        engine:
+            Optional engine paramter for injection. If not provided, produced from
+            the default config
         logging_level : int, optional
             Level for the logger output (default is logging.INFO)
         entry_mode : str, optional
@@ -185,36 +220,14 @@ class DbConnection:
 
         # Set up logger
         self._setup_logger(logging_level)
+        if engine is None:
+            connection_parameters = get_database_connection_parameters()
+            engine = engine_from_config(connection_parameters)
 
-        # Extract connection info from configuration file
-        fpath = _get_dataregistry_config(self.logger, config_file)
-
-        with open(fpath) as f:
-            connection_parameters = yaml.safe_load(f)
-
-        # If connection parameters include password and file is not
-        # protected, complain
-        if fpath == _DEFAULT_LOC_NERSC:
-            pass
-        elif os.stat(fpath).st_mode & _OTHER_ACCESS:
-            auth_string = connection_parameters["sqlalchemy.url"]
-            if auth_string.startswith(_PQ_AUTH_PREFIX):
-                if auth_string.startswith(_PQ_AUTH_PREFIX + "reg_reader"):
-                    pass
-                else:
-                    # partially parse to see if password is included
-                    auth_string = auth_string[len(_PQ_AUTH_PREFIX):]
-                    if auth_string.find(":") < auth_string.find("@"):
-                        raise ValueError(
-                            f"config file {fpath} must be accessible only to user"
-                        )
-
-        # Build the engine
-        self._engine = engine_from_config(connection_parameters)
+        self._engine = engine
 
         # Pull out the database dialect
-        driver = make_url(connection_parameters["sqlalchemy.url"]).drivername
-        self._dialect = driver.split("+")[0]
+        self._dialect = self._engine.dialect
 
         # Make sure manually passed schema name is valid formatting
         # If `schema` is passed, it also sets the entry and query modes
@@ -334,7 +347,7 @@ class DbConnection:
                 return [self.production_schema]
             elif self._query_mode == "working":
                 return [self.schema]
-            else:          # both
+            else:  # both
                 return [self.production_schema, self.schema]
 
     @property
@@ -368,10 +381,10 @@ class DbConnection:
         if which_schema not in {"both", "working", "production"}:
             raise ValueError(f"{which_schema} is a bad `which_schema`")
 
-        if self._dialect == "sqlite":   # only one schema
+        if self._dialect == "sqlite":  # only one schema
             return [self.schema]
 
-        if not self._namespace:   # only one schema
+        if not self._namespace:  # only one schema
             return [self.schema]
         else:
             if which_schema == "both":
@@ -532,7 +545,7 @@ class DbConnection:
 
         return list(duplicates)
 
-# ----
+    # ----
     @cached_property
     def map_column_to_table(self):
         """
@@ -560,12 +573,12 @@ class DbConnection:
                 if self.metadata["tables"][table].schema != self.entry_schema:
                     continue
 
-                if col.name in all_columns:   # already seen
+                if col.name in all_columns:  # already seen
                     columns_to_table[col.name] = None
                 else:
                     all_columns.add(col.name)
                     # strip off schema if there is one
-                    columns_to_table[col.name] = table.split('.')[-1:]
+                    columns_to_table[col.name] = table.split(".")[-1:]
 
         return columns_to_table
 
@@ -637,8 +650,9 @@ def _insert_provenance(
     id : int
         Id of new row in provenance table
     """
-    from dataregistry.git_util import get_git_info
     from git import InvalidGitRepositoryError
+
+    from dataregistry.git_util import get_git_info
 
     version_fields = __version__.split(".")
     values = dict()
@@ -681,11 +695,11 @@ def _insert_provenance(
 
 
 def _insert_keyword(
-        db_connection,
-        keyword,
-        system,
-        description=None,
-        creator_uid=None,
+    db_connection,
+    keyword,
+    system,
+    description=None,
+    creator_uid=None,
 ):
     """
     Write a row to a keyword table.

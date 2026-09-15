@@ -1,10 +1,12 @@
+import logging
+import os
+
+import yaml
+
 from dataregistry.db_basic import DbConnection
 from dataregistry.query import Query
 from dataregistry.registrar import Registrar
 from dataregistry.registrar.registrar_util import _form_dataset_path
-import yaml
-import os
-import logging
 
 _HERE = os.path.dirname(__file__)
 _SITE_CONFIG_PATH = os.path.join(_HERE, "site_config", "site_rootdir.yaml")
@@ -21,6 +23,7 @@ class DataRegistry:
         site=None,
         namespace=None,
         schema=None,
+        db_connection=None,
         entry_mode="working",
         query_mode="working",
     ):
@@ -75,21 +78,22 @@ class DataRegistry:
         """
 
         # Establish connection to database
-        self.db_connection = DbConnection(
-            config_file=config_file,
-            schema=schema,
-            logging_level=logging_level,
-            namespace=namespace,
-            entry_mode=entry_mode,
-            query_mode=query_mode,
-        )
+        if db_connection is None:
+            self.db_connection = DbConnection(
+                config_file=config_file,
+                schema=schema,
+                logging_level=logging_level,
+                namespace=namespace,
+                entry_mode=entry_mode,
+                query_mode=query_mode,
+            )
+        self.db_connection = db_connection
 
         # Work out the location of the root directory
         self.root_dir = self._get_root_dir(root_dir, site)
 
         # Create registrar object
-        self.registrar = Registrar(self.db_connection, self.root_dir, owner,
-                                   owner_type)
+        self.registrar = Registrar(self.db_connection, self.root_dir, owner, owner_type)
         self.Registrar = self.registrar  # for backward compatibility
 
         # Create query object
@@ -226,7 +230,10 @@ class DataRegistry:
 
 
         """
-        filters = [self.query.gen_filter("dataset." + k, "==", v) for (k, v) in conditions.items()]
+        filters = [
+            self.query.gen_filter("dataset." + k, "==", v)
+            for (k, v) in conditions.items()
+        ]
 
         # run the actual query and ask for a dataframe back for convenience.
         property_names = None
@@ -235,7 +242,9 @@ class DataRegistry:
             for req_col in ["owner_type", "owner", "relative_path"]:
                 if req_col not in columns:
                     property_names.append("dataset." + req_col)
-        results = self.query.find_datasets(filters=filters, property_names=property_names, return_format='dataframe')
+        results = self.query.find_datasets(
+            filters=filters, property_names=property_names, return_format="dataframe"
+        )
 
         # We will need this schema information to
         # generate the absolute path for each dataset.
@@ -246,7 +255,7 @@ class DataRegistry:
         if not self.db_connection._namespace:
             schema_name = None
         else:
-            schema_name = self.db_connection._namespace + '_' + schema
+            schema_name = self.db_connection._namespace + "_" + schema
 
         # Get the absolute path for each dataset.
         # We avoid using the query.get_dataset_absolute_path function here
@@ -269,7 +278,9 @@ class DataRegistry:
 
         # remove the "dataset." prefix from the keys
         results = results.rename(
-            columns=lambda key: key[len("dataset."):] if key.startswith("dataset.") else key
+            columns=lambda key: (
+                key[len("dataset.") :] if key.startswith("dataset.") else key
+            )
         )
 
         # remove any columns that the user did not actually want
@@ -284,16 +295,22 @@ class DataRegistry:
         if return_format == "dataframe":
             return results
         elif return_format == "dict_of_lists":
-            return results.to_dict(orient='list')
+            return results.to_dict(orient="list")
         elif return_format == "list_of_dicts":
-            return results.to_dict(orient='records')
+            return results.to_dict(orient="records")
 
         raise ValueError(f"Invalid return_format {return_format}")
 
     # Simplify calls to functions in Registrar object
-    def fetch(self, dataset_id, schema_type="working",
-              destination_path=None, destination_endpoint="NERSC DTN",
-              no_cfs_copy=False, globus_threshold=5000):
+    def fetch(
+        self,
+        dataset_id,
+        schema_type="working",
+        destination_path=None,
+        destination_endpoint="NERSC DTN",
+        no_cfs_copy=False,
+        globus_threshold=5000,
+    ):
         """
         Fetch a registered dataset. This is just a wrapper which calls
         Registrar.fetch.
@@ -325,19 +342,22 @@ class DataRegistry:
         -------
         Absolute cfs path of dataset when it was registered
         """
-        return self.registrar.dataset.fetch(self.query, dataset_id,
-                                            schema_type=schema_type,
-                                            destination_path=destination_path,
-                                            destination_endpoint=destination_endpoint,
-                                            no_cfs_copy=no_cfs_copy,
-                                            globus_threshold=globus_threshold)
+        return self.registrar.dataset.fetch(
+            self.query,
+            dataset_id,
+            schema_type=schema_type,
+            destination_path=destination_path,
+            destination_endpoint=destination_endpoint,
+            no_cfs_copy=no_cfs_copy,
+            globus_threshold=globus_threshold,
+        )
 
     def register_dataset(
-            self,
-            name,
-            version,
-            **kw,
-            ):
+        self,
+        name,
+        version,
+        **kw,
+    ):
         """
         Convenience function which just calls
         DataRegistry.registrar.dataset.register.   See DatasetTable.register
@@ -345,11 +365,7 @@ class DataRegistry:
         """
         return self.registrar.dataset.register(name, version, **kw)
 
-    def modify_dataset(
-            self,
-            dataset_id,
-            update_dict
-            ):
+    def modify_dataset(self, dataset_id, update_dict):
         """
         Convenience function which just calls a generic modify function
         on the dataset table.   See BaseTable.modify
@@ -358,11 +374,11 @@ class DataRegistry:
         self.registrar.dataset.modify(dataset_id, update_dict)
 
     def replace_dataset(
-            self,
-            name,
-            version,
-            **kw,
-            ):
+        self,
+        name,
+        version,
+        **kw,
+    ):
         """
         Convenience function which just calls
         DataRegistry.registrar.dataset.replace.   See DatasetTable.replace
@@ -370,20 +386,15 @@ class DataRegistry:
         """
         return self.registrar.dataset.replace(name, version, **kw)
 
-    def delete_dataset(
-            self,
-            name,
-            version_string,
-            owner,
-            owner_type,
-            confirm=False):
+    def delete_dataset(self, name, version_string, owner, owner_type, confirm=False):
         """
         Convenience function which just calls
         DataRegistry.registrar.dataset.delete.   See DatasetTable.delete
         for complete argument and return description.
         """
-        return self.registrar.dataset.delete(name, version_string, owner,
-                                             owner_type, confirm=confirm)
+        return self.registrar.dataset.delete(
+            name, version_string, owner, owner_type, confirm=confirm
+        )
 
     def add_keywords_to_dataset(self, dataset_id, keyword):
         """
@@ -396,8 +407,7 @@ class DataRegistry:
         keyword : list[str]
             Keywords to add to dataset
         """
-        return self.registrar.keyword.add_keywords_to_dataset(dataset_id,
-                                                              keyword)
+        return self.registrar.keyword.add_keywords_to_dataset(dataset_id, keyword)
 
     def remove_keywords_froom_dataset(self, dataset_id, keyword):
         """
@@ -410,26 +420,25 @@ class DataRegistry:
         keyword : list[str]
             Keywords to remove from dataset
         """
-        return self.registrar.keyword.remove_keywords_from_dataset(dataset_id,
-                                                                   keyword)
+        return self.registrar.keyword.remove_keywords_from_dataset(dataset_id, keyword)
 
     def create_keyword(self, keyword, system=False, description=""):
         """
         Convenience routine.   See
         Keyword.create_keyword for complete description of arguments
         """
-        return self.registrar.keyword.create_keyword(keyword,
-                                                     system=system,
-                                                     description=description)
+        return self.registrar.keyword.create_keyword(
+            keyword, system=system, description=description
+        )
 
     def create_keywords(self, keywords, owner_type="user", system=False):
         """
         Convenience routine.   See
         Keyword.create_keywords for complete description of arguments
         """
-        return self.registrar.keyword.create_keywords(keywords,
-                                                      owner_type=owner_type,
-                                                      system=system)
+        return self.registrar.keyword.create_keywords(
+            keywords, owner_type=owner_type, system=system
+        )
 
     # Simplify calls to functions in Query object
     def find_datasets(self, **kwargs):
@@ -443,8 +452,9 @@ class DataRegistry:
         """
         See Query.get_dataset_absolute_path for complete description.
         """
-        return self.query.get_dataset_absolute_path(dataset_id, schema=schema,
-                                                    silent=silent)
+        return self.query.get_dataset_absolute_path(
+            dataset_id, schema=schema, silent=silent
+        )
 
     def get_all_tables(self):
         """
@@ -452,14 +462,15 @@ class DataRegistry:
         """
         return self.query.get_all_tables()
 
-    def get_all_columns(self, table="dataset", include_table=True,
-                        include_schema=False):
+    def get_all_columns(
+        self, table="dataset", include_table=True, include_schema=False
+    ):
         """
         See Query.get_all_columns for complete description
         """
-        return self.query.get_all_columns(table=table,
-                                          include_table=include_table,
-                                          include_schema=include_schema)
+        return self.query.get_all_columns(
+            table=table, include_table=include_table, include_schema=include_schema
+        )
 
     def get_modifiable_columns(self, table="dataset"):
         """
@@ -491,11 +502,7 @@ class DataRegistry:
         """
         return self.registrar.execution.register(name, **kwargs)
 
-    def modify_execution(
-            self,
-            execution_id,
-            update_dict
-            ):
+    def modify_execution(self, execution_id, update_dict):
         """
         Convenience function which just calls a generic modify function
         on the execution table.   See BaseTable.modify
@@ -503,10 +510,7 @@ class DataRegistry:
         """
         self.registrar.execution.modify(execution_id, update_dict)
 
-    def modify_keyword(
-            self,
-            keyword_id,
-            update_dict):
+    def modify_keyword(self, keyword_id, update_dict):
         """
         Convenience function which just calls a generic modify function
         on the keyword table.   See BaseTable.modify
@@ -514,17 +518,9 @@ class DataRegistry:
         """
         self.registrar.keyword.modify(keyword_id, update_dict)
 
-    def get_table_values(
-            self,
-            table,
-            properties,
-            query_mode=None,
-            filters=[]):
+    def get_table_values(self, table, properties, query_mode=None, filters=[]):
         """
         Convenience function which calls the get_table_values function
         of the Query object. See full documentation there.
         """
-        return self.query.get_table_values(table,
-                                           properties,
-                                           query_mode,
-                                           filters)
+        return self.query.get_table_values(table, properties, query_mode, filters)
