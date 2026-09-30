@@ -177,25 +177,45 @@ def test_strip_table_names_also_strips_the_expanded_status(seeded, rows):
     assert row["status"]["deleted"] is True
 
 
+def test_strip_table_names_rejects_multi_table_queries(seeded, query):
+    response = query(
+        {
+            "property_names": [NAME, "execution.name"],
+            "strip_table_names": True,
+        }
+    )
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "INVALID_REQUEST"
+    assert error["message"] == "Can only strip out table names for single table queries"
+
+
 def test_unknown_column_is_a_client_error(seeded, query):
     response = query({"property_names": ["dataset.not_a_column"]})
 
     assert response.status_code == 422
-    assert "not_a_column" in response.json()["error"]["message"]
+    error = response.json()["error"]
+    assert error["code"] == "UNKNOWN_COLUMN"
+    assert "not_a_column" in error["message"]
 
 
 def test_unknown_bare_column_is_a_client_error(seeded, query):
     response = query({"property_names": ["not_a_column"]})
 
     assert response.status_code == 422
-    assert "not_a_column" in response.json()["error"]["message"]
+    error = response.json()["error"]
+    assert error["code"] == "UNKNOWN_COLUMN"
+    assert "not_a_column" in error["message"]
 
 
 def test_unknown_table_is_a_client_error(seeded, query):
     response = query({"property_names": ["not_a_table.name"]})
 
     assert response.status_code == 422
-    assert "not_a_table" in response.json()["error"]["message"]
+    error = response.json()["error"]
+    assert error["code"] == "UNKNOWN_COLUMN"
+    assert "not_a_table" in error["message"]
 
 
 def test_ambiguous_bare_column_is_a_client_error(seeded, query):
@@ -203,7 +223,9 @@ def test_ambiguous_bare_column_is_a_client_error(seeded, query):
     response = query({"property_names": ["description"]})
 
     assert response.status_code == 422
-    message = response.json()["error"]["message"].lower()
+    error = response.json()["error"]
+    assert error["code"] == "AMBIGUOUS_COLUMN"
+    message = error["message"].lower()
     assert "description" in message
     assert "table" in message
 
@@ -212,6 +234,7 @@ def test_malformed_column_name_is_a_client_error(seeded, query):
     response = query({"property_names": ["a.b.c"]})
 
     assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INVALID_REQUEST"
 
 
 def test_empty_property_names_is_a_client_error(seeded, query):
@@ -266,7 +289,9 @@ def test_ordering_operator_on_a_string_column_is_a_client_error(seeded, query):
     response = query({"filters": [{"property_name": OWNER, "op": ">", "value": "a"}]})
 
     assert response.status_code == 422
-    assert ">" in response.json()["error"]["message"]
+    error = response.json()["error"]
+    assert error["code"] == "INVALID_FILTER"
+    assert ">" in error["message"]
 
 
 def test_filters_combine_with_and(seeded, rows):
@@ -597,7 +622,8 @@ def test_unknown_namespace_is_a_client_error(seeded, query):
     """A nonexistent namespace must not surface as a 500."""
     response = query(namespace="no_such_namespace")
 
-    assert response.status_code in (404, 422)
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "UNKNOWN_NAMESPACE"
 
 
 # ---------------------------------------------------------------------------
@@ -712,6 +738,7 @@ def test_order_by_an_unknown_column_is_a_client_error(seeded, query):
     response = query({"order_by": [asc("dataset.not_a_column")]})
 
     assert response.status_code == 422
+    assert response.json()["error"]["code"] == "UNKNOWN_COLUMN"
 
 
 @pytest.mark.parametrize(

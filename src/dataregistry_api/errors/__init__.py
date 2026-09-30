@@ -15,6 +15,11 @@ from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from dataregistry.exceptions import (
+    DataRegistryColumnSpec,
+    DataRegistryException,
+    DataRegistryNoColumn,
+)
 from dataregistry_api.models import Error, ErrorDetail
 
 #: Spelled out rather than imported from `starlette.status`, whose name for
@@ -118,12 +123,79 @@ def _envelope(error: Error, status_code: int) -> JSONResponse:
     )
 
 
+def _query_error_response(error: QueryError) -> JSONResponse:
+    """Render an API query error through the common response envelope."""
+    return _envelope(error.as_error(), error.status_code)
+
+
+def _namespace_from_request(request: Request) -> str | None:
+    """Return a safely usable namespace from a dataset-query request."""
+    namespace = request.query_params.get("namespace")
+    if namespace is None:
+        return None
+    if not namespace or namespace.endswith(("_working", "_production")):
+        return None
+    if not all(char.isalnum() or char in "_-" for char in namespace):
+        return None
+    return namespace
+
+
+def _is_missing_namespace(request: Request, exc: DataRegistryException) -> bool:
+    """Whether reflection identified the request's working schema as absent."""
+    namespace = _namespace_from_request(request)
+    if namespace is None:
+        return False
+    expected = f"no Provenance table {namespace}_working.provenance"
+    return str(exc).startswith("Incompatible database: ") and expected in str(exc)
+
+
+def _value_error_to_query_error(exc: ValueError) -> QueryError | None:
+    """Translate only stable, client-input errors raised by ``Query``."""
+    message = str(exc)
+    if message.startswith("check_filter:"):
+        return InvalidFilterError(message)
+    if message.endswith(" is not a valid column"):
+        return QueryError(message)
+    if message.startswith(("order_by ", "limit must be", "offset must be")):
+        return QueryError(message)
+    if message.startswith(("`entry_mode`", "`query_mode`", "Invalid schema name")):
+        return QueryError(message)
+    return None
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Install handlers so every 4xx shares the documented envelope."""
 
     @app.exception_handler(QueryError)
     def _handle_query_error(_: Request, exc: QueryError) -> JSONResponse:
-        return _envelope(exc.as_error(), exc.status_code)
+        return _query_error_response(exc)
+
+    @app.exception_handler(DataRegistryNoColumn)
+    def _handle_missing_column(_: Request, exc: DataRegistryNoColumn) -> JSONResponse:
+        return _query_error_response(UnknownColumnError(str(exc)))
+
+    @app.exception_handler(DataRegistryColumnSpec)
+    def _handle_ambiguous_column(
+        _: Request, exc: DataRegistryColumnSpec
+    ) -> JSONResponse:
+        return _query_error_response(AmbiguousColumnError(str(exc)))
+
+    @app.exception_handler(DataRegistryException)
+    def _handle_dataregistry_error(
+        request: Request, exc: DataRegistryException
+    ) -> JSONResponse:
+        if _is_missing_namespace(request, exc):
+            return _query_error_response(UnknownNamespaceError(str(exc)))
+        if str(exc) == "Can only strip out table names for single table queries":
+            return _query_error_response(QueryError(str(exc)))
+        raise exc
+
+    @app.exception_handler(ValueError)
+    def _handle_value_error(_: Request, exc: ValueError) -> JSONResponse:
+        error = _value_error_to_query_error(exc)
+        if error is not None:
+            return _query_error_response(error)
+        raise exc
 
     @app.exception_handler(RequestValidationError)
     def _handle_validation_error(
