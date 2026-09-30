@@ -1,4 +1,4 @@
-from pydantic import Field, NonNegativeInt
+from pydantic import Field, NonNegativeInt, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL
 
@@ -40,6 +40,23 @@ class DatabasePoolSettings(BaseSettings):
     max_overflow: NonNegativeInt = Field(default=10)
     pool_timeout: NonNegativeInt = Field(default=5)
     pool_recycle: NonNegativeInt = Field(default=1800)
+
+
+class GlobusAuthSettings(BaseSettings):
+    """Settings for validating API bearer tokens with Globus Auth.
+
+    The API is a resource server.  Its confidential-client credential is used
+    only to call Globus Auth's token-introspection endpoint; it is never a
+    credential presented by an API client.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="dataregistry_api_")
+
+    globus_auth_client_id: str | None = None
+    globus_auth_client_secret: SecretStr | None = None
+    globus_auth_expected_audience: str | None = None
+    globus_auth_required_scope: str | None = None
+    globus_auth_issuer: str = "https://auth.globus.org"
 
 
 def get_database_connection_url(settings: DatabaseSettings | None = None) -> URL:

@@ -1,0 +1,859 @@
+openapi: 3.1.0
+
+info:
+  title: DataRegistry Read API
+  version: 0.1.0
+  description: >
+    Read-only HTTP surface for the LSSTDESC `dataregistry` metadata catalog.
+
+
+    This spec covers the **query / read** operations currently exposed by the
+    Python client library (`DataRegistry` facade + `Query` class in
+    `src/dataregistry/query.py`). Write operations (register / modify / replace /
+    delete / keyword creation) and the asynchronous Globus `fetch` transfer are
+    intentionally **out of scope** for this first phase.
+
+
+    ## Cross-cutting concepts
+
+    - **Namespace / schema.** A *namespace* (default `lsst_desc`) is a pair of
+      schemas: `<namespace>_working` (user-writable) and
+      `<namespace>_production` (curated). Every read is parameterized by a
+      namespace.
+
+    - **query_mode.** Selects which schema(s) a read searches: `working`
+      (default), `production`, or `both`. In `both` mode results from the two
+      schemas are concatenated. Alias and keyword reads cannot use `both`.
+
+    - **Filters.** A filter is `{property_name, op, value}`. `property_name` is a
+      column, either fully qualified (`dataset.owner`) or bare (`owner`, resolved
+      to its table when unambiguous). See `#/components/schemas/Filter` and
+      `GET /schema/operators` for the operator grammar.
+
+    - **status.** The dataset `status` bitmask is expanded into booleans
+      (`valid`, `deleted`, `archived`, `replaced`) in responses; the raw integer
+      is also returned as `status_raw`.
+
+servers:
+  - url: /v1
+    description: Version 1 of the read API
+
+tags:
+  - name: Datasets
+    description: Query and retrieve dataset metadata
+  - name: Aliases
+    description: Query and resolve dataset aliases
+  - name: Keywords
+    description: Controlled-vocabulary keyword listing
+  - name: Schema
+    description: Schema and valid-value introspection
+  - name: Entities
+    description: Generic single-row lookup by primary key
+
+# Applied to every operation; overridable per-operation with an empty array.
+security:
+  - bearerAuth: []
+
+paths:
+  ############################################################################
+  # Datasets
+  ############################################################################
+  /datasets/query:
+    post:
+      operationId: queryDatasets
+      tags: [Datasets]
+      summary: Query datasets (find_datasets)
+      description: >
+        The primary query endpoint. Mirrors `Query.find_datasets`: select a set
+        of columns (`property_names`, possibly spanning joined tables) subject to
+        a list of `filters`, and return matching rows. Joins across
+        `dataset` / `execution` / `keyword` / `dependency` are inferred from the
+        requested columns.
+
+
+        **Parameter placement.** The URL says *which catalog* to read
+        (`namespace`, `query_mode`); the body says *what to ask it* (columns,
+        filters, ordering, pagination, response shape). Filters are therefore
+        kept out of the query string, which additionally keeps filter values —
+        which may include usernames via `dataset.owner` — out of proxy and
+        server access logs.
+      parameters:
+        - $ref: '#/components/parameters/Namespace'
+        - $ref: '#/components/parameters/QueryMode'
+      requestBody:
+        required: true
+        description: >
+          The query. Send `{}` to explicitly request the default page of all
+          `dataset` columns with no filters.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DatasetQueryRequest'
+            examples:
+              everything:
+                summary: Explicit empty query — first page of all datasets
+                value: {}
+              byOwnerAndVersion:
+                summary: Datasets owned by alice, version >= 2, name like "sky*"
+                value:
+                  property_names:
+                    - dataset.name
+                    - dataset.version_string
+                    - dataset.owner
+                  filters:
+                    - { property_name: dataset.owner, op: "==", value: alice }
+                    - { property_name: dataset.version_major, op: ">=", value: 2 }
+                    - { property_name: dataset.name, op: "~=", value: "sky*" }
+              paged:
+                summary: Second page of 50, newest first, tie-broken by id
+                value:
+                  limit: 50
+                  offset: 50
+                  order_by:
+                    - { column: dataset.register_date, direction: desc }
+                    - { column: dataset.dataset_id, direction: asc }
+      responses:
+        '200':
+          description: Matching rows.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DatasetQueryResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /datasets/aggregate:
+    post:
+      operationId: aggregateDatasets
+      tags: [Datasets]
+      summary: Aggregate over datasets (aggregate_datasets)
+      description: >
+        Run a single aggregation (`count`, `sum`, `min`, `max`, `avg`) over a
+        column, optionally filtered. `count` may target `dataset`,
+        `dataset_alias`, `keyword`, or `dataset_keyword`; other functions target
+        `dataset` only and require a numeric column.
+      parameters:
+        - $ref: '#/components/parameters/Namespace'
+        - $ref: '#/components/parameters/QueryMode'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AggregateRequest'
+            examples:
+              countAll:
+                value: { agg_func: count, table_name: dataset }
+              avgDiskSpace:
+                value:
+                  agg_func: avg
+                  column_name: total_disk_space
+                  filters:
+                    - { property_name: dataset.owner_type, op: "==", value: project }
+      responses:
+        '200':
+          description: The aggregated scalar value.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AggregateResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /datasets/{dataset_id}:
+    get:
+      operationId: getDataset
+      tags: [Datasets]
+      summary: Fetch a single dataset by id
+      description: >
+        Convenience single-row lookup, equivalent to `find_datasets` filtered on
+        `dataset.dataset_id`. Returns all `dataset` columns with the `status`
+        bitmask expanded.
+      parameters:
+        - $ref: '#/components/parameters/DatasetId'
+        - $ref: '#/components/parameters/Namespace'
+        - $ref: '#/components/parameters/SchemaType'
+      responses:
+        '200':
+          description: The dataset.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Dataset'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /datasets/{dataset_id}/path:
+    get:
+      operationId: getDatasetPath
+      tags: [Datasets]
+      summary: Absolute path of a dataset (get_dataset_absolute_path)
+      description: >
+        Resolve a dataset's absolute on-disk path. Only datasets whose
+        `location_type` is `dataregistry` or `dummy` have a path; others return
+        `path: null`.
+      parameters:
+        - $ref: '#/components/parameters/DatasetId'
+        - $ref: '#/components/parameters/Namespace'
+        - $ref: '#/components/parameters/SchemaType'
+      responses:
+        '200':
+          description: The resolved path (may be null for unmanaged datasets).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DatasetPathResponse'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /datasets/{dataset_id}/keywords:
+    get:
+      operationId: getDatasetKeywords
+      tags: [Datasets]
+      summary: Keywords attached to a dataset (get_keywords_from_dataset)
+      parameters:
+        - $ref: '#/components/parameters/DatasetId'
+        - $ref: '#/components/parameters/Namespace'
+        - $ref: '#/components/parameters/SchemaType'
+      responses:
+        '200':
+          description: The dataset's keywords.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keywords]
+                properties:
+                  keywords:
+                    type: array
+                    items: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  ############################################################################
+  # Aliases
+  ############################################################################
+  /aliases:
+    get:
+      operationId: findAliases
+      tags: [Aliases]
+      summary: Query the dataset_alias table (find_aliases)
+      description: >
+        Returns rows from the `dataset_alias` table. Alias reads always target a
+        single schema (never `both`); the schema is chosen from the namespace and
+        `query_mode`.
+      parameters:
+        - $ref: '#/components/parameters/Namespace'
+        - $ref: '#/components/parameters/SchemaType'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - name: alias
+          in: query
+          description: Filter to aliases whose `alias` name matches (exact).
+          required: false
+          schema: { type: string }
+        - name: dataset_id
+          in: query
+          description: Filter to aliases pointing at this dataset id.
+          required: false
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Matching alias rows.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AliasList'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /aliases/{alias}/resolve:
+    get:
+      operationId: resolveAlias
+      tags: [Aliases]
+      summary: Resolve an alias (resolve_alias / resolve_alias_fully)
+      description: >
+        Resolve what an alias points to. By default performs a single hop
+        (`resolve_alias`), returning either a dataset or another alias. With
+        `fully=true` (`resolve_alias_fully`) the alias chain is followed to the
+        terminal dataset.
+      parameters:
+        - name: alias
+          in: path
+          required: true
+          description: Alias name (string) or alias id (integer).
+          schema:
+            oneOf:
+              - { type: string }
+              - { type: integer }
+        - $ref: '#/components/parameters/Namespace'
+        - $ref: '#/components/parameters/SchemaType'
+        - name: fully
+          in: query
+          required: false
+          description: Follow the alias chain to the terminal dataset.
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: The resolution result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AliasResolution'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  ############################################################################
+  # Keywords
+  ############################################################################
+  /keywords:
+    get:
+      operationId: listKeywords
+      tags: [Keywords]
+      summary: List keywords (get_keyword_list)
+      description: >
+        List the controlled-vocabulary keywords. Keywords are unique per schema,
+        so `query_mode=both` is not allowed here.
+      parameters:
+        - $ref: '#/components/parameters/Namespace'
+        - $ref: '#/components/parameters/SchemaType'
+      responses:
+        '200':
+          description: The keyword list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keywords]
+                properties:
+                  keywords:
+                    type: array
+                    items: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  ############################################################################
+  # Schema / introspection
+  ############################################################################
+  /schema/tables:
+    get:
+      operationId: getTables
+      tags: [Schema]
+      summary: List table names (get_all_tables)
+      parameters:
+        - $ref: '#/components/parameters/Namespace'
+      responses:
+        '200':
+          description: Sorted list of table names.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tables]
+                properties:
+                  tables:
+                    type: array
+                    items: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /schema/columns:
+    get:
+      operationId: getColumns
+      tags: [Schema]
+      summary: List column names (get_all_columns)
+      parameters:
+        - $ref: '#/components/parameters/Namespace'
+        - name: table
+          in: query
+          required: false
+          description: Limit to one table. Omit (or `all`) to return every table.
+          schema: { type: string, default: dataset }
+        - name: include_table
+          in: query
+          required: false
+          schema: { type: boolean, default: true }
+        - name: include_schema
+          in: query
+          required: false
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: Sorted list of column identifiers.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [columns]
+                properties:
+                  columns:
+                    type: array
+                    items: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /schema/columns/modifiable:
+    get:
+      operationId: getModifiableColumns
+      tags: [Schema]
+      summary: List modifiable columns (get_modifiable_columns)
+      description: >
+        Columns flagged `modifiable` in the schema for a given table. Read-only
+        metadata (useful to a future write API), available for `dataset`,
+        `execution`, and `dataset_alias`.
+      parameters:
+        - $ref: '#/components/parameters/Namespace'
+        - name: table
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [dataset, execution, dataset_alias]
+            default: dataset
+      responses:
+        '200':
+          description: Modifiable columns for the table.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [columns]
+                properties:
+                  columns:
+                    type: array
+                    items: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /schema/owner-types:
+    get:
+      operationId: getOwnerTypes
+      tags: [Schema]
+      summary: Valid owner_type values (get_owner_types)
+      parameters:
+        - $ref: '#/components/parameters/Namespace'
+      responses:
+        '200':
+          description: Set of valid owner_type values.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [owner_types]
+                properties:
+                  owner_types:
+                    type: array
+                    items: { type: string }
+                    example: [user, project, group, production]
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /schema/operators:
+    get:
+      operationId: getOperators
+      tags: [Schema]
+      summary: Filter operator grammar
+      description: >
+        Discoverability endpoint (not backed by a library call): the set of
+        filter operators and the columns on which wildcard matching is allowed,
+        so clients can validate filters without hardcoding the grammar.
+      responses:
+        '200':
+          description: The operator grammar.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperatorGrammar'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  ############################################################################
+  # Generic single-entity lookup
+  ############################################################################
+  /{table}/{entry_id}:
+    get:
+      operationId: getEntry
+      tags: [Entities]
+      summary: Fetch a single row by primary key (find_entry)
+      description: >
+        Generic single-row lookup by primary key for the entity tables. For
+        `dataset` prefer `GET /datasets/{dataset_id}`, which additionally expands
+        the `status` bitmask.
+      parameters:
+        - name: table
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [dataset, execution, dataset_alias, keyword]
+        - name: entry_id
+          in: path
+          required: true
+          schema: { type: integer }
+        - $ref: '#/components/parameters/Namespace'
+        - $ref: '#/components/parameters/SchemaType'
+      responses:
+        '200':
+          description: The row as a flat object of column/value pairs.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  #############################################################################
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Globus Auth access token
+      description: >
+        A Globus Auth access token intended for the DataRegistry resource
+        server and containing its required read scope. The server validates
+        tokens through Globus Auth token introspection.
+
+  #############################################################################
+  parameters:
+    Namespace:
+      name: namespace
+      in: query
+      required: false
+      description: Namespace (schema pair) to read from. Defaults server-side to `lsst_desc`.
+      schema: { type: string, default: lsst_desc }
+    QueryMode:
+      name: query_mode
+      in: query
+      required: false
+      description: Which schema(s) to search.
+      schema:
+        type: string
+        enum: [working, production, both]
+        default: working
+    SchemaType:
+      name: schema
+      in: query
+      required: false
+      description: >
+        Single schema to search (`both` not permitted for these endpoints).
+      schema:
+        type: string
+        enum: [working, production]
+        default: working
+    DatasetId:
+      name: dataset_id
+      in: path
+      required: true
+      schema: { type: integer }
+    # Note: pagination for /datasets/query lives in the request body, not here.
+    # These remain for the GET collection endpoints.
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum number of rows to return (pagination — new to the API).
+      schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+    Offset:
+      name: offset
+      in: query
+      required: false
+      schema: { type: integer, minimum: 0, default: 0 }
+
+  #############################################################################
+  schemas:
+    Operator:
+      type: string
+      description: >
+        Filter comparison operator. `==`/`=` and `!=` apply to any type;
+        `<`,`<=`,`>`,`>=` require an orderable (numeric/datetime) column;
+        `~=` (case-insensitive) and `~==` (case-sensitive) are wildcard matches
+        (wildcard char `*`) allowed only on the columns listed by
+        `GET /schema/operators`.
+      enum: ["==", "=", "!=", "<", "<=", ">", ">=", "~=", "~=="]
+
+    Filter:
+      type: object
+      description: A single WHERE-clause constraint (the library `Filter` namedtuple).
+      required: [property_name, op, value]
+      properties:
+        property_name:
+          type: string
+          description: >
+            Column to filter on. Fully qualified (`dataset.owner`) or a bare name
+            (`owner`) resolved to its table when unambiguous.
+          example: dataset.owner
+        op:
+          $ref: '#/components/schemas/Operator'
+        value:
+          description: Comparison value; type should match the column.
+          oneOf:
+            - { type: string }
+            - { type: number }
+            - { type: boolean }
+
+    SortKey:
+      type: object
+      description: A single sort key. Multiple keys are applied in array order.
+      required: [column]
+      properties:
+        column:
+          type: string
+          description: >
+            Column to sort by. Fully qualified (`dataset.register_date`) or a
+            bare name resolved to its table when unambiguous.
+          example: dataset.register_date
+        direction:
+          type: string
+          enum: [asc, desc]
+          default: asc
+
+    DatasetQueryRequest:
+      type: object
+      description: >
+        The full query. Every field is optional; `{}` is a valid request
+        meaning "first page of all `dataset` columns, unfiltered".
+      properties:
+        property_names:
+          type: array
+          description: Columns to return. Omit for all `dataset` columns.
+          items: { type: string }
+          nullable: true
+        filters:
+          type: array
+          items: { $ref: '#/components/schemas/Filter' }
+          default: []
+        order_by:
+          type: array
+          description: >
+            Sort keys, applied in order. Unordered results are not guaranteed
+            stable across pages, so supply a unique tie-breaker (e.g.
+            `dataset.dataset_id`) whenever paginating.
+          items: { $ref: '#/components/schemas/SortKey' }
+          default: []
+        limit:
+          type: integer
+          description: Maximum number of rows to return (pagination — new to the API).
+          minimum: 1
+          maximum: 1000
+          default: 100
+        offset:
+          type: integer
+          minimum: 0
+          default: 0
+        strip_table_names:
+          type: boolean
+          description: >
+            Return bare column names (`name`) instead of qualified ones
+            (`dataset.name`). Only safe when the selected columns come from a
+            single table, since qualification is what keeps `dataset.name` and
+            `execution.name` apart.
+          default: false
+    DatasetQueryResponse:
+      type: object
+      required: [format, page_count, limit, offset, data]
+      properties:
+        format:
+          type: string
+          enum: [records]
+          description: The API's canonical row-oriented response format.
+        page_count:
+          type: integer
+          description: Number of rows returned in this page.
+        total_count:
+          type: integer
+          nullable: true
+          description: >
+            Total rows matching the filters, ignoring `limit`/`offset`. Requires
+            a second counting query, so it may be null if the server declines to
+            compute it.
+        limit:
+          type: integer
+          description: The `limit` actually applied (echoed for clients that omitted it).
+        offset:
+          type: integer
+          description: The `offset` actually applied.
+        data:
+          description: An array of row objects.
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+
+    AggregateRequest:
+      type: object
+      required: [agg_func]
+      properties:
+        agg_func:
+          type: string
+          enum: [count, sum, min, max, avg]
+          default: count
+        column_name:
+          type: string
+          nullable: true
+          description: Column to aggregate. May be null only for `count`.
+        table_name:
+          type: string
+          enum: [dataset, dataset_alias, keyword, dataset_keyword]
+          default: dataset
+          description: Non-`dataset` tables are only valid with `agg_func=count`.
+        filters:
+          type: array
+          items: { $ref: '#/components/schemas/Filter' }
+          default: []
+
+    AggregateResponse:
+      type: object
+      required: [agg_func, value]
+      properties:
+        agg_func: { type: string }
+        column_name: { type: string, nullable: true }
+        value:
+          description: Scalar result; null when undefined (e.g. min/avg of empty set).
+          oneOf:
+            - { type: number }
+            - { type: 'null' }
+
+    DatasetStatus:
+      type: object
+      description: Expanded form of the dataset `status` bitmask.
+      properties:
+        valid: { type: boolean }
+        deleted: { type: boolean }
+        archived: { type: boolean }
+        replaced: { type: boolean }
+
+    Dataset:
+      type: object
+      description: >
+        A row of the `dataset` table. Columns are passed through as-is; only a
+        representative subset is enumerated here, and `status` is expanded.
+      additionalProperties: true
+      properties:
+        dataset_id: { type: integer }
+        name: { type: string }
+        version_string: { type: string }
+        version_major: { type: integer }
+        version_minor: { type: integer }
+        version_patch: { type: integer }
+        owner: { type: string }
+        owner_type: { type: string }
+        relative_path: { type: string, nullable: true }
+        description: { type: string, nullable: true }
+        location_type: { type: string }
+        nfiles: { type: integer, nullable: true }
+        total_disk_space: { type: number, nullable: true }
+        register_date: { type: string, format: date-time, nullable: true }
+        creation_date: { type: string, format: date-time, nullable: true }
+        execution_id: { type: integer, nullable: true }
+        status_raw:
+          type: integer
+          description: The raw status bitmask integer.
+        status:
+          $ref: '#/components/schemas/DatasetStatus'
+
+    DatasetPathResponse:
+      type: object
+      required: [dataset_id, path]
+      properties:
+        dataset_id: { type: integer }
+        path:
+          type: string
+          nullable: true
+          description: Absolute path, or null for unmanaged datasets.
+
+    Alias:
+      type: object
+      additionalProperties: true
+      properties:
+        dataset_alias_id: { type: integer }
+        alias: { type: string }
+        dataset_id: { type: integer, nullable: true }
+        ref_alias_id: { type: integer, nullable: true }
+        register_date: { type: string, format: date-time, nullable: true }
+        supersede_date: { type: string, format: date-time, nullable: true }
+
+    AliasList:
+      type: object
+      required: [count, data]
+      properties:
+        count: { type: integer }
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Alias' }
+
+    AliasResolution:
+      type: object
+      description: >
+        Result of resolving an alias. For a single hop, `ref_type` distinguishes
+        a dataset target from another alias. For `fully=true`, `ref_type` is
+        always `dataset`.
+      required: [id, ref_type]
+      properties:
+        id:
+          type: integer
+          nullable: true
+          description: Id of the referenced dataset or alias; null if unresolved.
+        ref_type:
+          type: string
+          enum: [dataset, alias]
+          nullable: true
+
+    OperatorGrammar:
+      type: object
+      properties:
+        operators:
+          type: array
+          items: { $ref: '#/components/schemas/Operator' }
+        wildcard_char:
+          type: string
+          example: "*"
+        wildcard_allowed_columns:
+          type: array
+          description: Columns on which `~=` / `~==` may be used.
+          items: { type: string }
+          example:
+            - dataset.name
+            - dataset.owner
+            - dataset.relative_path
+            - dataset.access_api
+        string_operators:
+          type: array
+          description: Operators valid on non-orderable (string) columns.
+          items: { type: string }
+          example: ["==", "=", "!=", "~=", "~=="]
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            detail: { type: string }
+
+  #############################################################################
+  responses:
+    BadRequest:
+      description: Malformed request (e.g. unknown operator or request field).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Missing or invalid credentials.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: The requested entity does not exist.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    UnprocessableEntity:
+      description: >
+        The request was well-formed but semantically invalid (e.g. unknown
+        column, ambiguous bare column name, operator not allowed on the column
+        type, or wildcard on a disallowed column).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }

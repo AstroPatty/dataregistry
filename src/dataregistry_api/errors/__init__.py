@@ -25,6 +25,8 @@ from dataregistry_api.models import Error, ErrorDetail
 #: Spelled out rather than imported from `starlette.status`, whose name for
 #: 422 changed between releases.
 HTTP_404_NOT_FOUND = 404
+HTTP_401_UNAUTHORIZED = 401
+HTTP_403_FORBIDDEN = 403
 HTTP_422_UNPROCESSABLE_CONTENT = 422
 
 
@@ -89,6 +91,21 @@ class InvalidFilterError(QueryError):
     code = "INVALID_FILTER"
 
 
+class AuthenticationError(QueryError):
+    """No acceptable credentials were supplied for a protected endpoint."""
+
+    status_code = HTTP_401_UNAUTHORIZED
+    code = "UNAUTHENTICATED"
+    headers = {"WWW-Authenticate": "Bearer"}
+
+
+class AuthorizationError(QueryError):
+    """Credentials are valid but do not grant the requested access."""
+
+    status_code = HTTP_403_FORBIDDEN
+    code = "INSUFFICIENT_SCOPE"
+
+
 def make_unknown_column_error(
     column: str, candidates: set[str] | None = None
 ) -> UnknownColumnError:
@@ -117,15 +134,17 @@ def make_ambiguous_column_error(
     )
 
 
-def _envelope(error: Error, status_code: int) -> JSONResponse:
+def _envelope(
+    error: Error, status_code: int, headers: dict[str, str] | None = None
+) -> JSONResponse:
     return JSONResponse(
-        status_code=status_code, content=jsonable_encoder(error.model_dump())
+        status_code=status_code, content=jsonable_encoder(error.model_dump()), headers=headers
     )
 
 
 def _query_error_response(error: QueryError) -> JSONResponse:
     """Render an API query error through the common response envelope."""
-    return _envelope(error.as_error(), error.status_code)
+    return _envelope(error.as_error(), error.status_code, getattr(error, "headers", None))
 
 
 def _namespace_from_request(request: Request) -> str | None:

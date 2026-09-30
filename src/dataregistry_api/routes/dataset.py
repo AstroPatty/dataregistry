@@ -1,7 +1,8 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
+from dataregistry_api.auth import require_globus_principal
 from dataregistry_api.database import EngineDependency
 from dataregistry_api.handlers import find_datasets
 from dataregistry_api.models import (
@@ -10,7 +11,11 @@ from dataregistry_api.models import (
     DatasetQueryResponse,
 )
 
-DatasetRouter = APIRouter(prefix="/datasets", tags=["Datasets"])
+DatasetRouter = APIRouter(
+    prefix="/datasets",
+    tags=["Datasets"],
+    dependencies=[Depends(require_globus_principal)],
+)
 
 QueryParameterDependency = Annotated[DatasetQueryParameters, Query()]
 

@@ -33,6 +33,7 @@ them.
    :hidden:
 
    installation
+   installation_api
 
 .. toctree::
    :maxdepth: 2
@@ -68,6 +69,7 @@ them.
    dev_notes_spin
    dev_notes_database
    installation_locally
+   api_authentication_plan
    database_upgrades
 
 .. toctree::

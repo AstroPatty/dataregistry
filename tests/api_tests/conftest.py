@@ -54,6 +54,7 @@ from sqlalchemy.exc import OperationalError
 
 from dataregistry_api import database
 from dataregistry_api.app import APP
+from dataregistry_api.auth import GlobusPrincipal, require_globus_principal
 from dataregistry_api.config import DatabaseSettings, get_database_connection_url
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -270,8 +271,22 @@ def client(connection):
     """
     from fastapi.testclient import TestClient
 
-    with TestClient(APP) as test_client:
-        yield test_client
+    def authenticated_principal() -> GlobusPrincipal:
+        return GlobusPrincipal(
+            subject="test-globus-identity",
+            username="api-test",
+            name="API Test",
+            email=None,
+            scopes=frozenset({"test:read"}),
+            identities=frozenset({"test-globus-identity"}),
+        )
+
+    APP.dependency_overrides[require_globus_principal] = authenticated_principal
+    try:
+        with TestClient(APP) as test_client:
+            yield test_client
+    finally:
+        APP.dependency_overrides.pop(require_globus_principal, None)
 
 
 @pytest.fixture
