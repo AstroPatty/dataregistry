@@ -47,13 +47,6 @@ class QueryMode(str, Enum):
     BOTH = "both"
 
 
-class ReturnFormat(str, Enum):
-    """Shape of the rows in a query response."""
-
-    PROPERTY_DICT = "property_dict"
-    RECORDS = "records"
-
-
 class Filter(BaseModel):
     """A single WHERE-clause constraint.
 

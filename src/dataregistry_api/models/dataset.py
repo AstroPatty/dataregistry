@@ -1,10 +1,10 @@
 from enum import Enum
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from dataregistry_api.config import get_default_namespace
-from dataregistry_api.models.common import Filter, QueryMode, ReturnFormat
+from dataregistry_api.models.common import Filter, QueryMode
 
 #: Namespace used when a request does not name one. Read from the environment
 #: at import time (``DATAREGISTRY_API_NAMESPACE``) so a deployment can host the
@@ -105,7 +105,6 @@ class DatasetQueryRequest(BaseModel):
         ),
     ] = DEFAULT_LIMIT
     offset: Annotated[int, Field(ge=0)] = 0
-    return_format: ReturnFormat = ReturnFormat.RECORDS
     strip_table_names: Annotated[
         bool,
         Field(
@@ -132,16 +131,12 @@ class DatasetQueryRequest(BaseModel):
 #: A row of results in `records` format.
 RecordsData = list[dict[str, Any]]
 
-#: Column-oriented results in `property_dict` format.
-PropertyDictData = dict[str, list[Any]]
-
-
 class DatasetQueryResponse(BaseModel):
     """Body of a successful ``POST /datasets/query``."""
 
     model_config = ConfigDict(extra="forbid")
 
-    format: ReturnFormat
+    format: Literal["records"] = "records"
     page_count: Annotated[
         int, Field(ge=0, description="Number of rows returned in this page.")
     ]
@@ -165,26 +160,9 @@ class DatasetQueryResponse(BaseModel):
     ]
     offset: Annotated[int, Field(ge=0, description="The `offset` actually applied.")]
     data: Annotated[
-        RecordsData | PropertyDictData,
-        Field(
-            description=(
-                "An array of row objects for `records`, or an object of "
-                "column to value-array for `property_dict`."
-            ),
-        ),
+        RecordsData,
+        Field(description="An array of row objects."),
     ]
-
-    @model_validator(mode="after")
-    def _validate_data_shape(self) -> Self:
-        if self.format is ReturnFormat.RECORDS:
-            if not isinstance(self.data, list):
-                raise ValueError("records format requires `data` to be a list of rows")
-        elif not isinstance(self.data, dict):
-            raise ValueError(
-                "property_dict format requires `data` to be a mapping of "
-                "column to values"
-            )
-        return self
 
     @classmethod
     def from_records(
@@ -196,31 +174,10 @@ class DatasetQueryResponse(BaseModel):
         offset: int = 0,
     ) -> Self:
         return cls(
-            format=ReturnFormat.RECORDS,
+            format="records",
             page_count=len(records),
             total_count=total_count,
             limit=limit,
             offset=offset,
             data=records,
-        )
-
-    @classmethod
-    def from_property_dict(
-        cls,
-        columns: PropertyDictData,
-        *,
-        total_count: int | None = None,
-        limit: int = DEFAULT_LIMIT,
-        offset: int = 0,
-    ) -> Self:
-        page_count = len(next(iter(columns.values()))) if columns else 0
-        if any(len(values) != page_count for values in columns.values()):
-            raise ValueError("property_dict columns must all be the same length")
-        return cls(
-            format=ReturnFormat.PROPERTY_DICT,
-            page_count=page_count,
-            total_count=total_count,
-            limit=limit,
-            offset=offset,
-            data=columns,
         )

@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime
+from math import isnan
+from typing import Any
+
 from sqlalchemy import Engine
 
 from dataregistry.db_basic import DbConnection
 from dataregistry.query import Query
+from dataregistry.registrar.dataset_util import VALID_STATUS_BITS, get_dataset_status
 from dataregistry_api.models import (
     DatasetQueryParameters,
     DatasetQueryRequest,
     DatasetQueryResponse,
-    ReturnFormat,
 )
+
+ROOT_TABLE = "dataset"
+STATUS_COLUMN = f"{ROOT_TABLE}.status"
+STATUS_RAW_COLUMN = f"{ROOT_TABLE}.status_raw"
+
 
 def get_query(engine: Engine, parameters: DatasetQueryParameters) -> Query:
     connection = DbConnection(
@@ -20,6 +29,32 @@ def get_query(engine: Engine, parameters: DatasetQueryParameters) -> Query:
         query_mode=parameters.query_mode,
     )
     return Query(connection, "/")  # placeholder path
+
+
+def _json_value(value: Any) -> Any:
+    """Convert values not natively represented by JSON without changing numbers."""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, float) and isnan(value):
+        return None
+    return value
+
+
+def _shape_records(records: list[dict[str, Any]], strip_table_names: bool) -> list[dict[str, Any]]:
+    """Apply API-only status expansion and JSON scalar serialization."""
+    status_key = "status" if strip_table_names else STATUS_COLUMN
+    status_raw_key = "status_raw" if strip_table_names else STATUS_RAW_COLUMN
+    shaped: list[dict[str, Any]] = []
+    for record in records:
+        row = {key: _json_value(value) for key, value in record.items()}
+        if status_key in row:
+            status = row.pop(status_key)
+            row[status_raw_key] = status
+            row[status_key] = {
+                bit: get_dataset_status(status, bit) for bit in VALID_STATUS_BITS
+            }
+        shaped.append(row)
+    return shaped
 
 
 def find_datasets(
@@ -83,16 +118,11 @@ def find_datasets(
         offset=request.offset,
     )
 
-    if request.return_format is ReturnFormat.PROPERTY_DICT:
-        return DatasetQueryResponse.from_property_dict(
-            result.to_dict(orient="list"),
-            total_count=total_count,
-            limit=request.limit,
-            offset=request.offset,
-        )
-
+    records = _shape_records(
+        result.to_dict(orient="records"), request.strip_table_names
+    )
     return DatasetQueryResponse.from_records(
-        result.to_dict(orient="records"),
+        records,
         total_count=total_count,
         limit=request.limit,
         offset=request.offset,

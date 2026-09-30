@@ -8,7 +8,6 @@ from dataregistry_api.models.common import (
     FilterValue,
     Operator,
     QueryMode,
-    ReturnFormat,
 )
 from dataregistry_api.models.dataset import (
     DEFAULT_LIMIT,
@@ -17,7 +16,6 @@ from dataregistry_api.models.dataset import (
     DatasetQueryParameters,
     DatasetQueryRequest,
     DatasetQueryResponse,
-    PropertyDictData,
     RecordsData,
     SortDirection,
     SortKey,
@@ -38,10 +36,8 @@ __all__ = [
     "Filter",
     "FilterValue",
     "Operator",
-    "PropertyDictData",
     "QueryMode",
     "RecordsData",
-    "ReturnFormat",
     "SortDirection",
     "SortKey",
 ]

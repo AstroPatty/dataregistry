@@ -3,7 +3,7 @@
 These describe the endpoint the OpenAPI spec promises, which is a slightly
 tighter contract than the underlying ``Query.find_datasets``:
 
-  - ``records`` is the default wire format, not the library's ``property_dict``.
+  - ``records`` is the API's sole wire format; client libraries may reshape it.
   - ``limit`` / ``offset`` / ``order_by`` exist only at the API layer; the
     library has no pagination at all. They are *body* fields: the query string
     carries only addressing (``namespace``, ``query_mode``).
@@ -103,36 +103,6 @@ def test_response_echoes_the_applied_pagination(seeded, query):
     assert payload["offset"] == 0
 
 
-def test_property_dict_format_is_column_oriented(seeded, query):
-    body = {
-        "property_names": [NAME, OWNER],
-        "filters": [eq(OWNER, "alice")],
-        "return_format": "property_dict",
-    }
-
-    payload = query(body).json()
-
-    assert payload["format"] == "property_dict"
-    assert set(payload["data"]) == {NAME, OWNER}
-    assert payload["data"][OWNER] == ["alice", "alice", "alice"]
-    assert payload["page_count"] == 3
-
-
-def test_property_dict_of_no_matches_keeps_the_columns(seeded, query):
-    """An empty result must still describe its shape, with count 0."""
-    body = {
-        "property_names": [NAME, OWNER],
-        "filters": [eq(OWNER, "nobody")],
-        "return_format": "property_dict",
-    }
-
-    payload = query(body).json()
-
-    assert payload["page_count"] == 0
-    assert set(payload["data"]) == {NAME, OWNER}
-    assert payload["data"][NAME] == []
-
-
 def test_no_matches_returns_an_empty_list_not_an_error(seeded, query):
     payload = query({"filters": [eq(OWNER, "nobody")]}).json()
 
@@ -146,9 +116,10 @@ def test_no_matches_returns_an_empty_list_not_an_error(seeded, query):
     }
 
 
-def test_dataframe_format_is_not_offered_over_the_wire(seeded, query):
-    """The library accepts `dataframe`; the API deliberately does not."""
-    assert query({"return_format": "dataframe"}).status_code == 422
+@pytest.mark.parametrize("return_format", ["records", "property_dict", "dataframe"])
+def test_return_format_is_not_offered_over_the_wire(seeded, query, return_format):
+    """The API has one canonical records representation, not a selector."""
+    assert query({"return_format": return_format}).status_code == 422
 
 
 # ---------------------------------------------------------------------------
@@ -189,19 +160,6 @@ def test_strip_table_names_returns_bare_keys(seeded, rows):
 
     assert set(row) == {"name", "version_string"}
     assert row["name"] == "DESC:legacy:removed"
-
-
-def test_strip_table_names_applies_to_property_dict_too(seeded, query):
-    body = {
-        "property_names": [NAME],
-        "filters": [eq(OWNER, "carol")],
-        "return_format": "property_dict",
-        "strip_table_names": True,
-    }
-
-    payload = query(body).json()
-
-    assert set(payload["data"]) == {"name"}
 
 
 def test_strip_table_names_also_strips_the_expanded_status(seeded, rows):
@@ -682,10 +640,9 @@ def test_offset_past_the_end_returns_nothing(seeded, rows):
     assert rows({"offset": 1000}) == []
 
 
-def test_pagination_applies_to_property_dict_too(seeded, query):
+def test_pagination_uses_the_canonical_records_format(seeded, query):
     body = {
         "property_names": [NFILES],
-        "return_format": "property_dict",
         "order_by": [asc(NFILES)],
         "limit": 2,
     }
@@ -693,7 +650,8 @@ def test_pagination_applies_to_property_dict_too(seeded, query):
     payload = query(body).json()
 
     assert payload["page_count"] == 2
-    assert payload["data"][NFILES] == [10, 20]
+    assert payload["format"] == "records"
+    assert [row[NFILES] for row in payload["data"]] == [10, 20]
 
 
 def test_order_by_ascending_is_the_default(seeded, rows):

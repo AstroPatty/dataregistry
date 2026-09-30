@@ -14,7 +14,6 @@ from dataregistry_api.models import (
     Filter,
     Operator,
     QueryMode,
-    ReturnFormat,
     SortDirection,
     SortKey,
 )
@@ -89,7 +88,6 @@ def test_request_defaults():
     assert request.order_by == []
     assert request.limit == DEFAULT_LIMIT
     assert request.offset == 0
-    assert request.return_format is ReturnFormat.RECORDS
     assert request.strip_table_names is False
 
 
@@ -156,6 +154,8 @@ def test_request_parses_filters():
     [
         {"property_names": []},
         {"property_names": ["  "]},
+        {"return_format": "records"},
+        {"return_format": "property_dict"},
         {"return_format": "dataframe"},
         {"unknown": True},
     ],
@@ -170,23 +170,9 @@ def test_response_from_records():
 
     response = DatasetQueryResponse.from_records(rows)
 
-    assert response.format is ReturnFormat.RECORDS
+    assert response.format == "records"
     assert response.page_count == 1
     assert response.data == rows
-
-
-def test_response_from_property_dict():
-    columns = {"dataset.name": ["sky", "cat"], "dataset.owner": ["alice", "bob"]}
-
-    response = DatasetQueryResponse.from_property_dict(columns)
-
-    assert response.format is ReturnFormat.PROPERTY_DICT
-    assert response.page_count == 2
-    assert response.data == columns
-
-
-def test_response_from_empty_property_dict():
-    assert DatasetQueryResponse.from_property_dict({}).page_count == 0
 
 
 def test_response_echoes_pagination():
@@ -211,20 +197,15 @@ def test_total_count_defaults_to_null():
     assert DatasetQueryResponse.from_records([{"a": 1}]).total_count is None
 
 
-def test_response_rejects_ragged_property_dict():
-    with pytest.raises(ValueError):
-        DatasetQueryResponse.from_property_dict({"a": [1, 2], "b": [1]})
-
-
-def test_response_rejects_mismatched_format_and_data():
+def test_response_rejects_non_records_data_or_format():
     with pytest.raises(ValidationError):
         DatasetQueryResponse(
-            format=ReturnFormat.RECORDS, page_count=0, limit=100, offset=0, data={}
+            format="records", page_count=0, limit=100, offset=0, data={}
         )
 
     with pytest.raises(ValidationError):
         DatasetQueryResponse(
-            format=ReturnFormat.PROPERTY_DICT,
+            format="property_dict",
             page_count=0,
             limit=100,
             offset=0,
