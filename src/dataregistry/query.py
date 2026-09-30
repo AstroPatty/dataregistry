@@ -548,6 +548,98 @@ class Query:
 
         return list(tables_required)
 
+    def _parse_order_by(self, order_by, schema_mode):
+        """Validate and resolve dataset-query ordering specifications.
+
+        ``order_by`` is a sequence of ``(column_name, direction)`` pairs.  The
+        column name follows the same qualified and unqualified-name rules as
+        selected columns and filters, while direction is either ``"asc"`` or
+        ``"desc"``.
+        """
+        if order_by is None:
+            return [], {}, {}
+
+        try:
+            order_by = list(order_by)
+        except TypeError as exc:
+            raise ValueError("order_by must be a sequence of (column, direction) pairs") from exc
+
+        order_columns = []
+        directions = []
+        for sort_key in order_by:
+            if not isinstance(sort_key, (tuple, list)) or len(sort_key) != 2:
+                raise ValueError(
+                    "order_by entries must be (column, direction) pairs"
+                )
+            column_name, direction = sort_key
+            if not isinstance(column_name, str):
+                raise ValueError("order_by column names must be strings")
+            if direction not in ("asc", "desc"):
+                raise ValueError("order_by direction must be 'asc' or 'desc'")
+            order_columns.append(column_name)
+            directions.append(direction)
+
+        tables_required, column_list, _ = self._parse_selected_columns(
+            order_columns, schema_mode=schema_mode
+        )
+        return tables_required, column_list, directions
+
+    @staticmethod
+    def _validate_pagination(limit, offset):
+        """Validate SQL pagination values without changing their defaults."""
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit < 0
+        ):
+            raise ValueError("limit must be a non-negative integer or None")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("offset must be a non-negative integer")
+
+    def _apply_ordering_and_pagination(
+        self, stmt, order_columns, directions, schema, limit=None, offset=0
+    ):
+        """Apply resolved ordering and SQL-level pagination to a statement."""
+        for column, direction in zip(order_columns.get(schema, []), directions):
+            stmt = stmt.order_by(column.asc() if direction == "asc" else column.desc())
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        if offset:
+            stmt = stmt.offset(offset)
+        return stmt
+
+    def _dataset_from_clause(self, tables_required, schema_str):
+        """Return the dataset table joined to every table required by a query."""
+        dataset_table = self.db_connection.metadata["tables"][
+            f"{schema_str}dataset"
+        ]
+        if len(tables_required) == 1:
+            return dataset_table
+
+        joined_tables = dataset_table
+        for table in tables_required:
+            if table in ["dataset", "keyword", "dependency"]:
+                continue
+            joined_tables = joined_tables.join(
+                self.db_connection.metadata["tables"][f"{schema_str}{table}"]
+            )
+
+        if "keyword" in tables_required:
+            joined_tables = joined_tables.join(
+                self.db_connection.metadata["tables"][
+                    f"{schema_str}dataset_keyword"
+                ]
+            ).join(self.db_connection.metadata["tables"][f"{schema_str}keyword"])
+
+        if "dependency" in tables_required:
+            dependency_table = self.db_connection.metadata["tables"][
+                f"{schema_str}dependency"
+            ]
+            joined_tables = joined_tables.join(
+                dependency_table,
+                dependency_table.c.input_id == dataset_table.c.dataset_id,
+            )
+
+        return joined_tables
+
     def get_keyword_list(self, query_mode=None):
         """Get list of keywords from the keywords table"""
 
@@ -657,6 +749,9 @@ class Query:
         return_format="property_dict",
         strip_table_names=False,
         schema_mode=None,
+        order_by=None,
+        limit=None,
+        offset=0,
     ):
         """
         Get specified properties for datasets satisfying all filters. Both
@@ -688,6 +783,13 @@ class Query:
             May be "production", "working" or None.  Defaults to None,
             in which case query mode established at connection time is used.
             Ignored unless query mode was "both"
+        order_by : list of (str, str), optional
+            Ordered ``(column_name, direction)`` pairs. Directions must be
+            ``"asc"`` or ``"desc"``.
+        limit : int, optional
+            Maximum number of result rows to return.
+        offset : int, optional
+            Number of result rows to skip before returning results.
 
         Returns
         -------
@@ -710,6 +812,8 @@ class Query:
         if self.db_connection.dialect == "sqlite":
             schema_mode = None
 
+        self._validate_pagination(limit, offset)
+
         # What tables and what columns are required for this query?
         canonical_names = self._regularize_property_names(property_names)
         tables_required, column_list, _ = self._parse_selected_columns(
@@ -718,12 +822,33 @@ class Query:
         tables_required = self._append_filter_tables(
             tables_required, filters, schema_mode
         )
+        order_tables, order_columns, order_directions = self._parse_order_by(
+            order_by, schema_mode
+        )
+        tables_required = list(set(tables_required).union(order_tables))
 
         # Can only strip table names for queries against a single table
         if strip_table_names and len(tables_required) > 1:
             raise DataRegistryException(
                 "Can only strip out table names for single table queries"
             )
+
+        # In both mode pagination applies to the public sequence (working rows
+        # followed by production rows), rather than separately to each query.
+        # Count working-schema rows first so each SQL statement can still apply
+        # its own LIMIT/OFFSET while honoring that combined sequence.
+        working_count = None
+        if schema_mode == "both" and (limit is not None or offset):
+            working_schema = next(iter(column_list))
+            schema_str = f"{working_schema}."
+            filter_mode = working_schema.split("_")[-1]
+            count_stmt = select(func.count()).select_from(
+                self._dataset_from_clause(tables_required, schema_str)
+            )
+            for f in filters:
+                count_stmt = self._render_filter(f, count_stmt, filter_mode)
+            with self._engine.connect() as conn:
+                working_count = conn.execute(count_stmt).scalar()
 
         # Construct query
         for sch in column_list.keys():  # Loop over each schema
@@ -733,56 +858,30 @@ class Query:
                 *[p.label(f"{p.table.name}.{p.name}") for p in column_list[sch]]
             )
 
-            # Create joins
-            if len(tables_required) > 1:
-                j = self.db_connection.metadata["tables"][f"{schema_str}dataset"]
-                for i in range(len(tables_required)):
-                    if tables_required[i] in ["dataset", "keyword", "dependency"]:
-                        continue
-
-                    j = j.join(
-                        self.db_connection.metadata["tables"][
-                            f"{schema_str}{tables_required[i]}"
-                        ]
-                    )
-
-                # Special case for many-to-many keyword join
-                if "keyword" in tables_required:
-                    j = j.join(
-                        self.db_connection.metadata["tables"][
-                            f"{schema_str}dataset_keyword"
-                        ]
-                    ).join(
-                        self.db_connection.metadata["tables"][f"{schema_str}keyword"]
-                    )
-
-                # Special case for dependencies
-                if "dependency" in tables_required:
-                    dataset_table = self.db_connection.metadata["tables"][
-                        f"{schema_str}dataset"
-                    ]
-                    dependency_table = self.db_connection.metadata["tables"][
-                        f"{schema_str}dependency"
-                    ]
-
-                    j = j.join(
-                        dependency_table,
-                        dependency_table.c.input_id
-                        == dataset_table.c.dataset_id,  # Explicit join condition
-                    )
-
-                stmt = stmt.select_from(j)
-            else:
-                stmt = stmt.select_from(
-                    self.db_connection.metadata["tables"][
-                        f"{schema_str}{tables_required[0]}"
-                    ]
-                )
+            stmt = stmt.select_from(
+                self._dataset_from_clause(tables_required, schema_str)
+            )
 
             # Append filters if acceptable
             if len(filters) > 0:
                 for f in filters:
                     stmt = self._render_filter(f, stmt, filter_mode)
+
+            query_limit = limit
+            query_offset = offset
+            if working_count is not None and sch != next(iter(column_list)):
+                query_offset = max(offset - working_count, 0)
+                if limit is not None:
+                    query_limit = max(limit - max(working_count - offset, 0), 0)
+
+            stmt = self._apply_ordering_and_pagination(
+                stmt,
+                order_columns,
+                order_directions,
+                sch,
+                limit=query_limit,
+                offset=query_offset,
+            )
 
             # Report the constructed SQL query
             self.db_connection.logger.debug(f"Executing query: {stmt}")
