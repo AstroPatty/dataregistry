@@ -118,7 +118,13 @@ class Query:
                 parts = c.split(".")
                 if len(parts) > 2:
                     raise ValueError(f"{c} is not a valid column")
-                elif len(parts) == 2:  # ok as is
+                elif len(parts) == 2:
+                    table_name, column_name = parts
+                    if (
+                        table_name not in self._schema_org
+                        or c not in self._schema_org[table_name]
+                    ):
+                        raise DataRegistryNoColumn(c)
                     canon_names.append(c)
                 else:
                     col_map = self.db_connection.map_column_to_table

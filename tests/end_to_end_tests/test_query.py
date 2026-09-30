@@ -8,11 +8,37 @@ from database_test_utils import (
 )
 
 from dataregistry import DataRegistry
-from dataregistry.exceptions import DataRegistryColumnSpec
+from dataregistry.exceptions import DataRegistryColumnSpec, DataRegistryNoColumn
 from dataregistry.schema import DEFAULT_NAMESPACE
 
 # Establish connection to database (default schema)
 datareg = DataRegistry(root_dir="temp")
+
+
+def _query_test_registry(dummy_file, query_mode="working", entry_mode="working"):
+    """Create a registry for ordering and pagination tests."""
+    _, tmp_root_dir = dummy_file
+    registry = DataRegistry(
+        root_dir=str(tmp_root_dir),
+        namespace=DEFAULT_NAMESPACE,
+        query_mode=query_mode,
+        entry_mode=entry_mode,
+    )
+    return registry
+
+
+def _insert_ordered_datasets(datareg, prefix):
+    """Insert a deterministic, uniquely named corpus for query tests."""
+    names = [f"{prefix}_{suffix}" for suffix in ["charlie", "alpha", "bravo"]]
+    dataset_ids = [
+        _insert_dataset_entry(datareg, name, "1.0.0", owner=prefix)
+        for name in names
+    ]
+    return names, dataset_ids
+
+
+def _owner_filter(datareg, owner):
+    return [datareg.query.gen_filter("dataset.owner", "==", owner)]
 
 
 def test_query_return_format():
@@ -62,6 +88,180 @@ def test_query_all(dummy_file):
 
     for c, v in results.items():
         assert len(v) == 1
+
+
+def test_find_datasets_order_by_selected_and_unselected_columns(dummy_file):
+    """Ordering accepts selected, unselected, qualified, and bare columns."""
+    prefix = "test_find_datasets_order_by"
+    datareg = _query_test_registry(dummy_file)
+    names, _ = _insert_ordered_datasets(datareg, prefix)
+    filters = _owner_filter(datareg, prefix)
+
+    ascending = datareg.find_datasets(
+        property_names=["dataset.name"],
+        filters=filters,
+        order_by=[("dataset.name", "asc")],
+    )
+    assert ascending["dataset.name"] == sorted(names)
+
+    descending = datareg.find_datasets(
+        property_names=["dataset.name"],
+        filters=filters,
+        order_by=[("dataset.dataset_id", "desc")],
+    )
+    assert descending["dataset.name"] == names[::-1]
+
+    bare_column = datareg.find_datasets(
+        property_names=["dataset.name"],
+        filters=filters,
+        order_by=[("dataset_id", "asc")],
+    )
+    assert bare_column["dataset.name"] == names
+
+
+def test_find_datasets_multiple_order_keys_limit_and_offset(dummy_file):
+    """Ordering and pagination are performed by the database query."""
+    prefix = "test_find_datasets_pagination"
+    datareg = _query_test_registry(dummy_file)
+    names, _ = _insert_ordered_datasets(datareg, prefix)
+    alpha_id = _insert_dataset_entry(
+        datareg, f"{prefix}_alpha", "2.0.0", owner=prefix
+    )
+    filters = _owner_filter(datareg, prefix)
+    order_by = [("dataset.name", "asc"), ("dataset.dataset_id", "desc")]
+
+    all_rows = datareg.find_datasets(
+        property_names=["dataset.name", "dataset.dataset_id"],
+        filters=filters,
+        order_by=order_by,
+    )
+    assert all_rows["dataset.name"] == sorted(names + [f"{prefix}_alpha"])
+    alpha_ids = [
+        dataset_id
+        for name, dataset_id in zip(
+            all_rows["dataset.name"], all_rows["dataset.dataset_id"]
+        )
+        if name == f"{prefix}_alpha"
+    ]
+    assert alpha_ids == sorted(alpha_ids, reverse=True)
+    assert alpha_id in alpha_ids
+
+    page = datareg.find_datasets(
+        property_names=["dataset.name", "dataset.dataset_id"],
+        filters=filters,
+        order_by=order_by,
+        limit=2,
+        offset=1,
+    )
+    assert page["dataset.name"] == all_rows["dataset.name"][1:3]
+    assert page["dataset.dataset_id"] == all_rows["dataset.dataset_id"][1:3]
+
+    unbounded = datareg.find_datasets(
+        property_names=["dataset.name"],
+        filters=filters,
+        order_by=order_by,
+        limit=None,
+    )
+    assert unbounded["dataset.name"] == all_rows["dataset.name"]
+
+    past_end = datareg.find_datasets(
+        property_names=["dataset.name"],
+        filters=filters,
+        order_by=order_by,
+        offset=3,
+    )
+    assert past_end["dataset.name"] == []
+
+
+def test_find_datasets_invalid_order_by(dummy_file):
+    """Sort columns and directions are validated by the library."""
+    datareg = _query_test_registry(dummy_file)
+
+    with pytest.raises(ValueError, match="direction"):
+        datareg.find_datasets(order_by=[("dataset.name", "sideways")])
+    with pytest.raises(DataRegistryNoColumn, match="dataset.not_a_column"):
+        datareg.find_datasets(order_by=[("dataset.not_a_column", "asc")])
+
+
+def test_count_datasets_with_filters_and_keyword_join(dummy_file):
+    """Counts use SQL result-row cardinality, including keyword joins."""
+    prefix = "test_count_datasets_keyword_join"
+    datareg = _query_test_registry(dummy_file)
+    dataset_id = _insert_dataset_entry(
+        datareg,
+        f"{prefix}_dataset",
+        "1.0.0",
+        owner=prefix,
+        keywords=["simulation", "observation"],
+    )
+    filters = _owner_filter(datareg, prefix) + [
+        datareg.query.gen_filter("keyword.keyword", "!=", "not-a-keyword")
+    ]
+
+    results = datareg.find_datasets(
+        property_names=["dataset.dataset_id", "keyword.keyword"],
+        filters=filters,
+        order_by=[("keyword.keyword", "asc")],
+    )
+    assert results["dataset.dataset_id"] == [dataset_id, dataset_id]
+    assert sorted(results["keyword.keyword"]) == ["observation", "simulation"]
+    assert datareg.query.count_datasets(filters=filters) == 2
+
+
+@pytest.mark.skipif(
+    datareg.db_connection._dialect == "sqlite", reason="production schemas require PostgreSQL"
+)
+def test_find_datasets_both_mode_pagination_and_count(dummy_file):
+    """Both-mode pages span the working/production boundary exactly once."""
+    prefix = "test_find_datasets_both_mode"
+    working = _query_test_registry(dummy_file, query_mode="both")
+    production = _query_test_registry(
+        dummy_file, query_mode="production", entry_mode="production"
+    )
+
+    _, working_ids = _insert_ordered_datasets(working, prefix)
+    production_id = _insert_dataset_entry(
+        production,
+        f"{prefix}_production",
+        "1.0.0",
+        owner=prefix,
+        owner_type="production",
+    )
+    filters = _owner_filter(working, prefix)
+    order_by = [("dataset.dataset_id", "asc")]
+
+    working_rows = working.find_datasets(
+        property_names=["dataset.dataset_id"],
+        filters=filters,
+        schema_mode="working",
+        order_by=order_by,
+    )
+    production_rows = working.find_datasets(
+        property_names=["dataset.dataset_id"],
+        filters=filters,
+        schema_mode="production",
+        order_by=order_by,
+    )
+    combined = working.find_datasets(
+        property_names=["dataset.dataset_id"], filters=filters, order_by=order_by
+    )
+    page = working.find_datasets(
+        property_names=["dataset.dataset_id"],
+        filters=filters,
+        order_by=order_by,
+        limit=2,
+        offset=2,
+    )
+
+    assert working_rows["dataset.dataset_id"] == sorted(working_ids)
+    assert production_rows["dataset.dataset_id"] == [production_id]
+    assert combined["dataset.dataset_id"] == (
+        working_rows["dataset.dataset_id"] + production_rows["dataset.dataset_id"]
+    )
+    assert page["dataset.dataset_id"] == combined["dataset.dataset_id"][2:4]
+    assert working.query.count_datasets(filters=filters) == len(
+        combined["dataset.dataset_id"]
+    )
 
 
 @pytest.mark.parametrize(
