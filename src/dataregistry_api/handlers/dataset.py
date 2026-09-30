@@ -2,21 +2,16 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Connection, Engine
+from sqlalchemy import Engine
 
 from dataregistry.db_basic import DbConnection
 from dataregistry.query import Query
-from dataregistry_api.catalog import ROOT_TABLE
 from dataregistry_api.models import (
     DatasetQueryParameters,
     DatasetQueryRequest,
     DatasetQueryResponse,
+    ReturnFormat,
 )
-
-#: Result key holding the raw `status` bitmask, alongside the expanded form.
-STATUS_COLUMN = f"{ROOT_TABLE}.status"
-STATUS_RAW_COLUMN = f"{ROOT_TABLE}.status_raw"
-
 
 def get_query(engine: Engine, parameters: DatasetQueryParameters) -> Query:
     connection = DbConnection(
@@ -66,42 +61,39 @@ def find_datasets(
         If a column cannot be resolved, or a filter cannot be applied to its
         column. Surfaces as a 4xx with the documented error envelope.
     """
+    request = request or DatasetQueryRequest()
     dreg_query = get_query(engine, parameters)
     filters = [f.as_library_filter() for f in request.filters]
+    order_by = [(sort.column, sort.direction.value) for sort in request.order_by]
+
+    # A count must use the same selection and ordering context as the page:
+    # either can require joins that alter result-row cardinality.
+    total_count = dreg_query.count_datasets(
+        filters=filters,
+        _property_names=request.property_names,
+        _order_by=order_by,
+    )
     result = dreg_query.find_datasets(
         property_names=request.property_names,
         filters=filters,
         return_format="dataframe",
         strip_table_names=request.strip_table_names,
+        order_by=order_by,
+        limit=request.limit,
+        offset=request.offset,
     )
 
-    return DatasetQueryResponse.from_records(result.to_dict(orient="records"))
+    if request.return_format is ReturnFormat.PROPERTY_DICT:
+        return DatasetQueryResponse.from_property_dict(
+            result.to_dict(orient="list"),
+            total_count=total_count,
+            limit=request.limit,
+            offset=request.offset,
+        )
 
-
-def _fetch_page(
-    connection: Connection, statements: list, limit: int, offset: int
-) -> list:
-    """Fetch one page across the statements, treating them as concatenated.
-
-    With a single schema this is a plain LIMIT/OFFSET. With ``both`` the page
-    may span the two schemas, so each is asked only for the slice that falls
-    inside the window.
-    """
-    rows: list = []
-    remaining = limit
-    to_skip = offset
-
-    for statement in statements:
-        if remaining <= 0:
-            break
-        matched = _count(connection, statement)
-        if to_skip >= matched:
-            to_skip -= matched
-            continue
-        page = statement.limit(remaining).offset(to_skip)
-        fetched = _execute(connection, page).fetchall()
-        rows.extend(fetched)
-        remaining -= len(fetched)
-        to_skip = 0
-
-    return rows
+    return DatasetQueryResponse.from_records(
+        result.to_dict(orient="records"),
+        total_count=total_count,
+        limit=request.limit,
+        offset=request.offset,
+    )
