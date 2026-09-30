@@ -183,6 +183,25 @@ def test_find_datasets_invalid_order_by(dummy_file):
         datareg.find_datasets(order_by=[("dataset.not_a_column", "asc")])
 
 
+@pytest.mark.parametrize(
+    ("column", "operator", "value", "message"),
+    [
+        ("dataset.nfiles", "==", "not-a-number", "must be an integer"),
+        ("dataset.total_disk_space", "==", "not-a-number", "must be numeric"),
+        ("dataset.is_overwritable", "==", 1, "must be a boolean"),
+        ("dataset.name", "~=", 1, "Wildcard value"),
+    ],
+)
+def test_find_datasets_rejects_invalid_filter_value_types(
+    dummy_file, column, operator, value, message
+):
+    datareg = _query_test_registry(dummy_file)
+    filter_ = datareg.query.gen_filter(column, operator, value)
+
+    with pytest.raises(ValueError, match=message):
+        datareg.find_datasets(filters=[filter_])
+
+
 def test_count_datasets_with_filters_and_keyword_join(dummy_file):
     """Counts use SQL result-row cardinality, including keyword joins."""
     prefix = "test_count_datasets_keyword_join"

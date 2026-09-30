@@ -152,7 +152,7 @@ def _is_missing_namespace(request: Request, exc: DataRegistryException) -> bool:
 def _value_error_to_query_error(exc: ValueError) -> QueryError | None:
     """Translate only stable, client-input errors raised by ``Query``."""
     message = str(exc)
-    if message.startswith("check_filter:"):
+    if message.startswith(("check_filter:", "Can only perform ~= search")):
         return InvalidFilterError(message)
     if message.endswith(" is not a valid column"):
         return QueryError(message)

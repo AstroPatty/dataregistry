@@ -134,7 +134,7 @@ def test_property_names_selects_only_the_requested_columns(seeded, rows):
 
 
 def test_result_keys_are_fully_qualified_by_default(seeded, rows):
-    row = rows({"property_names": ["name", "owner"], "filters": [eq(OWNER, "carol")]})[
+    row = rows({"property_names": [NAME, "owner"], "filters": [eq(OWNER, "carol")]})[
         0
     ]
 
@@ -363,7 +363,10 @@ def test_filter_value_type_mismatch_is_a_client_error(seeded, query):
     """A string compared against an integer column must not 500."""
     body = {"filters": [eq(NFILES, "not-a-number")]}
 
-    assert query(body).status_code in (400, 422)
+    response = query(body)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INVALID_FILTER"
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +462,7 @@ def test_wildcard_on_a_disallowed_column_is_a_client_error(seeded, query, operat
     response = query(body)
 
     assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INVALID_FILTER"
     assert "owner_type" in response.text or "~=" in response.text
 
 
@@ -473,7 +477,10 @@ def test_wildcard_is_accepted_on_every_allowlisted_column(seeded, query, column)
 def test_wildcard_against_a_non_string_value_is_a_client_error(seeded, query):
     body = {"filters": [{"property_name": NAME, "op": "~=", "value": 5}]}
 
-    assert query(body).status_code in (400, 422)
+    response = query(body)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INVALID_FILTER"
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +511,13 @@ def test_joining_execution_excludes_datasets_without_one(seeded, rows):
     ]
 
 
+def test_total_count_includes_selection_induced_join(seeded, query):
+    payload = query({"property_names": [NAME, "execution.name"]}).json()
+
+    assert payload["page_count"] == 3
+    assert payload["total_count"] == 3
+
+
 def test_columns_from_the_keyword_table(seeded, rows):
     """`keyword` is many-to-many, reached via `dataset_keyword`."""
     body = {
@@ -524,6 +538,30 @@ def test_filtering_on_a_keyword_without_selecting_it(seeded, rows):
     }
 
     assert names(rows(body)) == ["DESC:truth:catalog"]
+
+
+def test_total_count_includes_filter_induced_join(seeded, query):
+    payload = query(
+        {
+            "property_names": [NAME],
+            "filters": [eq("keyword.keyword", "simulation")],
+        }
+    ).json()
+
+    assert payload["page_count"] == 2
+    assert payload["total_count"] == 2
+
+
+def test_total_count_includes_ordering_induced_join(seeded, query):
+    payload = query(
+        {
+            "property_names": [NAME],
+            "order_by": [{"column": "execution.name", "direction": "asc"}],
+        }
+    ).json()
+
+    assert payload["page_count"] == 3
+    assert payload["total_count"] == 3
 
 
 def test_columns_from_the_dependency_table(seeded, rows):
@@ -844,6 +882,15 @@ def test_datetimes_are_iso_strings(seeded, rows):
     row = rows({"property_names": [NAME, "dataset.register_date"]})[0]
 
     assert row["dataset.register_date"].startswith("2026-01-")
+
+
+def test_date_values_are_iso_strings():
+    """The handler serializes date-only values as well as datetimes."""
+    from datetime import date
+
+    from dataregistry_api.handlers.dataset import _json_value
+
+    assert _json_value(date(2026, 1, 2)) == "2026-01-02"
 
 
 def test_nulls_are_preserved_as_null(seeded, rows):

@@ -14,11 +14,10 @@ def test_health_returns_healthy(client):
 def test_health_fails_when_the_database_is_unreachable():
     """A broken connection must surface as an error, not a healthy response."""
 
-    def broken_connection():
+    def broken_engine():
         raise RuntimeError("database is down")
-        yield  # pragma: no cover - makes this a generator dependency
 
-    APP.dependency_overrides[database.get_database_connection] = broken_connection
+    APP.dependency_overrides[database.get_engine] = broken_engine
     try:
         from fastapi.testclient import TestClient
 

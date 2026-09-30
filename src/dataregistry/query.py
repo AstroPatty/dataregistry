@@ -1,7 +1,8 @@
 from collections import namedtuple
+from numbers import Real
 
 import pandas as pd
-from sqlalchemy import DateTime, Float, Integer, Numeric, func, select
+from sqlalchemy import Boolean, DateTime, Float, Integer, Numeric, func, select
 from sqlalchemy.exc import DBAPIError
 
 from dataregistry.exceptions import (
@@ -506,6 +507,10 @@ class Query:
         if f[1] in ["~=", "~=="]:
             if f[0] not in ILIKE_ALLOWED:
                 raise ValueError(f"Can only perform ~= search on {ILIKE_ALLOWED}")
+            if not isinstance(value, str):
+                raise ValueError(
+                    f'check_filter: Wildcard value for "{f[0]}" must be a string'
+                )
 
             tmp = value.replace("%", r"\%").replace("_", r"\_").replace("*", "%")
 
@@ -518,6 +523,23 @@ class Query:
 
         # General case using traditional boolean operator
         else:
+            column_type = column_ref[sch_key][0].type
+            if isinstance(column_type, Integer) and (
+                isinstance(value, bool) or not isinstance(value, int)
+            ):
+                raise ValueError(
+                    f'check_filter: Value for "{f[0]}" must be an integer'
+                )
+            if isinstance(column_type, (Float, Numeric)) and (
+                isinstance(value, bool) or not isinstance(value, Real)
+            ):
+                raise ValueError(
+                    f'check_filter: Value for "{f[0]}" must be numeric'
+                )
+            if isinstance(column_type, Boolean) and not isinstance(value, bool):
+                raise ValueError(
+                    f'check_filter: Value for "{f[0]}" must be a boolean'
+                )
             return stmt.where(column_ref[sch_key][0].__getattribute__(the_op)(value))
 
     def _append_filter_tables(self, tables_required, filters, schema_mode):
