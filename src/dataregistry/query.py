@@ -640,6 +640,75 @@ class Query:
 
         return joined_tables
 
+    def count_datasets(
+        self,
+        filters=[],
+        schema_mode=None,
+        _property_names=None,
+        _order_by=None,
+    ) -> int:
+        """Count dataset query-result rows satisfying all filters.
+
+        ``_property_names`` and ``_order_by`` are optional internal query context
+        for callers that need a count with the same joins as a corresponding
+        :meth:`find_datasets` call. They do not affect the public default,
+        which counts dataset rows subject to ``filters``.
+
+        The count uses the same table discovery, joins, and filter rendering as
+        :meth:`find_datasets`. Consequently, joins that produce multiple rows
+        for a dataset (such as keyword joins) are counted once per result row.
+
+        Parameters
+        ----------
+        filters : list, optional
+            List of filters (WHERE clauses) to apply.
+        schema_mode : optional
+            May be ``"production"``, ``"working"``, or ``None``. Defaults to
+            the query mode established at connection time and is ignored unless
+            that mode is ``"both"``.
+
+        Returns
+        -------
+        int
+            Number of matching query-result rows.
+        """
+        if not schema_mode:
+            schema_mode = self.db_connection._query_mode
+        if self.db_connection.dialect == "sqlite":
+            schema_mode = None
+
+        if _property_names is None:
+            _property_names = ["dataset.dataset_id"]
+        tables_required, column_list, _ = self._parse_selected_columns(
+            _property_names, schema_mode=schema_mode
+        )
+        tables_required = self._append_filter_tables(
+            tables_required, filters, schema_mode
+        )
+        order_tables, _, _ = self._parse_order_by(_order_by, schema_mode)
+        tables_required = list(set(tables_required).union(order_tables))
+
+        counts = []
+        for sch in column_list:
+            schema_str = "" if self.db_connection.dialect == "sqlite" else f"{sch}."
+            filter_mode = None if schema_str == "" else sch.split("_")[-1]
+            stmt = select(func.count()).select_from(
+                self._dataset_from_clause(tables_required, schema_str)
+            )
+            for f in filters:
+                stmt = self._render_filter(f, stmt, filter_mode)
+
+            self.db_connection.logger.debug(f"Executing count query: {stmt}")
+            with self._engine.connect() as conn:
+                try:
+                    counts.append(conn.execute(stmt).scalar())
+                except DBAPIError as e:
+                    self.db_connection.logger.error("Original error:")
+                    self.db_connection.logger.error(e.StatementError.orig)
+                    return None
+
+        return sum(counts)
+
     def get_keyword_list(self, query_mode=None):
         """Get list of keywords from the keywords table"""
 
@@ -840,15 +909,12 @@ class Query:
         working_count = None
         if schema_mode == "both" and (limit is not None or offset):
             working_schema = next(iter(column_list))
-            schema_str = f"{working_schema}."
-            filter_mode = working_schema.split("_")[-1]
-            count_stmt = select(func.count()).select_from(
-                self._dataset_from_clause(tables_required, schema_str)
+            working_count = self.count_datasets(
+                filters=filters,
+                schema_mode=working_schema.split("_")[-1],
+                _property_names=canonical_names,
+                _order_by=order_by,
             )
-            for f in filters:
-                count_stmt = self._render_filter(f, count_stmt, filter_mode)
-            with self._engine.connect() as conn:
-                working_count = conn.execute(count_stmt).scalar()
 
         # Construct query
         for sch in column_list.keys():  # Loop over each schema
